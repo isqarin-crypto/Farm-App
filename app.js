@@ -148,11 +148,19 @@ function currentStage(b) {
   if (s) return s;
   return d > planEnd(b) ? { name: 'Past plan end', past: true } : null;
 }
+/* multi-day work: r.date = first day, r.endDate = last day (optional), r.extLog = [{on, from, to, why}] */
+const recEnd = r => (r.endDate && r.endDate > r.date ? r.endDate : r.date);
+const recDays = r => diff(r.date, recEnd(r)) + 1;
+function periodText(r) {
+  if (recEnd(r) === r.date) return '';
+  const n = (r.extLog || []).length;
+  return `${fd(r.date)} – ${fd(recEnd(r))} · ${recDays(r)} days${n ? ` · extended ${n === 1 ? 'once' : n + ' times'}` : ''}`;
+}
 function phiEnd(b, excludeId) {
   let end = null;
   for (const r of db.records) {
     if (r.blockId === b.id && r.type === 'spray' && r.status === 'done' && r.id !== excludeId && num(r.phiDays) > 0 && r.date >= (b.cycleFrom || '0000-01-01')) {
-      const e = addDays(r.date, num(r.phiDays));
+      const e = addDays(recEnd(r), num(r.phiDays));
       if (!end || e > end) end = e;
     }
   }
@@ -178,7 +186,7 @@ function restore(r) {
   r.used = null;
 }
 function setDone(r, done) {
-  if (done && r.status !== 'done') { r.status = 'done'; deduct(r); }
+  if (done && r.status !== 'done') { r.status = 'done'; r.doneOn = today(); if (r.endDate && today() >= r.date && today() < r.endDate) r.endDate = today() > r.date ? today() : ''; deduct(r); }
   else if (!done && r.status === 'done') { restore(r); r.status = 'planned'; }
 }
 function recTitle(r) {
@@ -189,12 +197,13 @@ function recTitle(r) {
 }
 function recSub(r, showBlock = true) {
   const p = [];
+  if (r.status === 'done' && periodText(r)) p.push(periodText(r));
   if (showBlock && r.blockId) p.push(blockLabel(blockById(r.blockId)));
   if (r.target) p.push(r.target);
   if (r.type === 'irrigation') { if (num(r.minutes)) p.push(fmt(num(r.minutes)) + ' min'); if (num(r.m3)) p.push(fmt(num(r.m3)) + ' m³'); }
   if (r.type === 'scouting' && r.severity) p.push('Pressure: ' + r.severity);
   if (r.type === 'fertigation' && (r.ec || r.ph)) p.push([r.ec ? 'EC ' + r.ec : '', r.ph ? 'pH ' + r.ph : ''].filter(Boolean).join(' '));
-  if (r.type === 'spray' && r.status === 'done' && num(r.phiDays) > 0) p.push('PHI to ' + fd(addDays(r.date, num(r.phiDays))));
+  if (r.type === 'spray' && r.status === 'done' && num(r.phiDays) > 0) p.push('PHI to ' + fd(addDays(recEnd(r), num(r.phiDays))));
   if (r.notes) p.push(r.notes.length > 60 ? r.notes.slice(0, 60) + '…' : r.notes);
   return p.join(' · ');
 }
@@ -231,19 +240,46 @@ function ask(msg, okLabel = 'OK') {
   });
 }
 
+function askExtend(r) {
+  return new Promise(res => {
+    const t = today(), end = recEnd(r), base = end > t ? end : t;
+    const quick = [[1, base === t ? 'Tomorrow' : '+1 day'], [2, '+2 days'], [3, '+3 days'], [7, '+1 week']];
+    const wrap = document.createElement('div');
+    wrap.setAttribute('role', 'dialog'); wrap.setAttribute('aria-modal', 'true'); wrap.setAttribute('aria-label', 'Extend task');
+    wrap.style.cssText = 'position:fixed;inset:0;background:rgba(23,33,27,.45);display:flex;align-items:flex-end;justify-content:center;z-index:20;padding:16px';
+    wrap.innerHTML = `<form style="background:#fff;border-radius:16px;padding:18px;max-width:520px;width:100%;display:flex;flex-direction:column;gap:12px;margin-bottom:env(safe-area-inset-bottom)">
+      <span style="font-size:16px;font-weight:700">Extend: ${esc(recTitle(r))}</span>
+      <span class="s">Started ${fd(r.date)} · currently ends ${fd(end)}</span>
+      <div class="chips">${end < t ? `<button type="button" class="chip" data-d="${t}">Until today</button>` : ''}${quick.map(([n, l]) => `<button type="button" class="chip" data-d="${addDays(base, n)}">${l}</button>`).join('')}</div>
+      <div class="f"><label for="ext_date">New last day</label><input id="ext_date" type="date" min="${addDays(end, 1)}" value="${addDays(base, base === end ? 1 : 0)}"></div>
+      <div class="f"><label for="ext_why">Reason (optional)</label><input id="ext_why" placeholder="e.g. Rain, short of labour, bigger job than planned" autocomplete="off"></div>
+      <div class="g2"><button type="button" class="btn" data-r="0">Cancel</button><button type="submit" class="btn pri">Extend</button></div></form>`;
+    const di = wrap.querySelector('#ext_date');
+    const done = v => { wrap.remove(); res(v); };
+    wrap.addEventListener('click', e => { const c = e.target.closest('[data-d]'); if (c) { di.value = c.dataset.d; wrap.querySelectorAll('[data-d]').forEach(x => x.classList.toggle('on', x === c)); } else if (e.target.closest('[data-r="0"]') || e.target === wrap) done(null); });
+    wrap.querySelector('form').addEventListener('submit', e => { e.preventDefault(); if (!di.value || di.value <= end) { toast('Choose a day after ' + fd(end) + '.'); return; } done({ to: di.value, why: wrap.querySelector('#ext_why').value.trim() }); });
+    wrap.addEventListener('keydown', e => { if (e.key === 'Escape') done(null); });
+    document.body.appendChild(wrap);
+  });
+}
+
 /* ---------- shared fragments ---------- */
 const alertH = (kind, icon, t, s, href) => `<${href ? `a href="${href}"` : 'div'} class="alert ${kind}">${ic(icon, 20, 2)}<span class="main"><span class="t">${esc(t)}</span>${s ? `<span class="s">${esc(s)}</span>` : ''}</span></${href ? 'a' : 'div'}>`;
 const back = (href, label) => `<a class="back" href="${href}">${ic('back', 18, 2)}${esc(label)}</a>`;
 const grpChips = r => recGroups(r).map(g => `<span class="grp">${esc(g)}</span>`).join(' ');
 function taskRow(r, showBlock = true) {
-  const late = r.date < today();
+  const t = today(), end = recEnd(r), late = end < t, multi = end > r.date;
+  const when = late ? `<b style="color:var(--warn)">Overdue · </b>${multi ? fd(r.date) + ' – ' + fd(end) : fd(r.date)}`
+    : multi && r.date <= t ? `<b style="color:var(--acc)">In progress · day ${diff(r.date, t) + 1} of ${recDays(r)}</b> · ends ${fd(end)}`
+    : multi ? `${fd(r.date)} – ${fd(end)} · ${recDays(r)} days` : fd(r.date);
+  const ext = r.date <= t ? `<button type="button" class="btn sm" data-act="extend" data-id="${r.id}" aria-label="Extend: ${esc(recTitle(r))}" style="flex:none">Extend</button>` : '';
   return `<div class="item planned"><input type="checkbox" class="check" data-act="toggle" data-id="${r.id}" ${r.status === 'done' ? 'checked' : ''} aria-label="Mark done: ${esc(recTitle(r))}">
-  <a class="main" href="#record/${r.id}"><span class="t">${esc(recTitle(r))}</span><span class="s">${late ? '<b style="color:var(--warn)">Overdue · </b>' : ''}${fd(r.date)}${recSub(r, showBlock) ? ' · ' + esc(recSub(r, showBlock)) : ''}</span></a></div>`;
+  <a class="main" href="#record/${r.id}"><span class="t">${esc(recTitle(r))}</span><span class="s">${when}${(r.extLog || []).length ? ` · extended ${r.extLog.length}×` : ''}${recSub(r, showBlock) ? ' · ' + esc(recSub(r, showBlock)) : ''}</span></a>${ext}</div>`;
 }
 function doneRow(r, showBlock = true) {
   return `<a class="item" href="#record/${r.id}"><span class="date">${fd(r.date)}</span><span class="main"><span class="t">${esc(recTitle(r))}</span>${r.type === 'spray' && recGroups(r).length ? `<span class="row" style="gap:6px">${grpChips(r)}</span>` : ''}<span class="s">${esc(recSub(r, showBlock))}</span></span></a>`;
 }
-const addButtons = (blockId) => `<div class="chips">${['spray', 'fertigation', 'scouting', 'irrigation', 'task'].map(t => `<a class="chip" href="#record/new?type=${t}${blockId ? '&block=' + blockId : ''}">${ic('plus', 14, 2.2)}${TYPES[t]}</a>`).join('')}${L('activities').map(a => `<a class="chip" href="#record/new?type=activity&act=${encodeURIComponent(a)}${blockId ? '&block=' + blockId : ''}">${ic('plus', 14, 2.2)}${esc(a)}</a>`).join('')}</div>`;
+const addButtons = (blockId) => `<div class="chips">${['spray', 'fertigation', 'scouting', 'irrigation', 'task'].map(t => `<a class="chip" href="#record/new?type=${t}${blockId ? '&block=' + blockId : ''}">${ic('plus', 14, 2.2)}${TYPES[t]}</a>`).join('')}${L('activities').map(a => `<a class="chip" href="#record/new?type=activity&act=${encodeURIComponent(encodeURIComponent(a))}${blockId ? '&block=' + blockId : ''}">${ic('plus', 14, 2.2)}${esc(a)}</a>`).join('')}</div>`;
 
 /* ---------- views ---------- */
 function vToday() {
@@ -283,6 +319,7 @@ function vToday() {
   ${due.length ? `<div class="list">${due.map(r => taskRow(r)).join('')}</div>` : `<div class="empty">Nothing planned for today.</div>`}
   ${week.length ? `<div class="between"><h2>Next 7 days</h2></div><div class="list">${week.map(r => taskRow(r)).join('')}</div>` : ''}
   <h2>Add a record</h2>${addButtons('')}
+  <a class="card" href="#ai" style="flex-direction:row;align-items:center;gap:14px"><span class="ib" style="background:var(--accbg);color:var(--acc);border:0">${ic('search', 22)}</span><span class="main"><span class="t">Ask Claude</span><span class="s">Identify a pest or disease from photos, or get advice — your crop, sprays and stock are included</span></span>${ic('chev', 18, 2)}</a>
   ${lp ? `<a class="card" href="#power" style="flex-direction:row;align-items:center;gap:14px"><span class="ib" style="background:var(--waterbg);color:var(--water);border:0">${ic('drop', 22)}</span><span class="main"><span class="t">${lp.tankPct !== '' && lp.tankPct != null ? `Tank ${fmt(num(lp.tankPct))}% · ` : ''}${fmt(num(lp.m3))} m³ pumped</span><span class="s">Last log ${fd(lp.date)} · ${fmt(num(lp.pvKwh))} kWh PV</span></span>${ic('chev', 18, 2)}</a>` : ''}`;
 }
 
@@ -330,6 +367,7 @@ function vBlock(id) {
   <p class="sec">Planned</p>${planned.length ? `<div class="list">${planned.map(r => taskRow(r, false)).join('')}</div>` : `<div class="empty">Nothing planned.</div>`}
   <p class="sec">Completed</p>${done.length ? `<div class="list">${done.map(r => doneRow(r, false)).join('')}</div>` : `<div class="empty">No records yet.</div>`}
   <h2>Add to ${esc(b.name)}</h2>${addButtons(b.id)}
+  <a class="btn block" href="#ai?block=${b.id}">${ic('search', 18, 2)}Ask Claude about ${esc(b.crop || b.name)}</a>
   <a class="btn ${cycleNeedsNew(b) || !b.crop ? 'pri' : ''} block" href="#newcycle/${b.id}">${ic('leaf', 18, 2)}${b.crop ? 'Finish crop & start new' : 'Start a new crop'}</a>
   ${pastCropsHtml(b)}`;
 }
@@ -405,7 +443,7 @@ function vBlockEdit() {
 function initDraft(id, q) {
   if (id && id !== 'new') { const r = db.records.find(x => x.id === id); return r ? JSON.parse(JSON.stringify(r)) : null; }
   const type = TYPES[q.get('type')] || q.get('type') === 'activity' ? q.get('type') : 'spray';
-  const d = { id: null, type, activity: type === 'activity' ? (q.get('act') || L('activities')[0] || 'Activity') : '', status: type === 'task' ? 'planned' : 'done', date: today(), blockId: q.get('block') || '', title: '', target: '', lines: [], waterLha: '', tankL: db.settings.tankL || '', phiDays: '', ec: '', ph: '', severity: '', count: '', minutes: '', m3: '', notes: '' };
+  const d = { id: null, type, activity: type === 'activity' ? (q.get('act') || L('activities')[0] || 'Activity') : '', status: type === 'task' ? 'planned' : 'done', date: today(), blockId: q.get('block') || '', title: '', target: '', lines: [], waterLha: '', tankL: db.settings.tankL || '', phiDays: '', ec: '', ph: '', severity: '', count: '', minutes: '', m3: '', notes: '', endDate: '', extLog: [] };
   ensureLines(d);
   return d;
 }
@@ -502,6 +540,7 @@ function vRecord() {
       <div id="calc">${calcHtml()}</div><div id="checks">${checksHtml()}</div>`;
   } else if (d.type === 'scouting') {
     specific = `${fld('target', 'Pest / disease found')}
+      ${d.blockId || d.target ? `<a class="btn sm" href="#ai?block=${d.blockId}&note=${encodeURIComponent(encodeURIComponent(d.target || ''))}" style="align-self:flex-start">${ic('search', 16, 2)}Ask Claude about this</a>` : ''}
       <div class="g2"><div class="f"><label for="r_severity">Pressure</label><select id="r_severity" data-f="severity">${['', 'none', 'low', 'moderate', 'high'].map(v => `<option value="${v}" ${d.severity === v ? 'selected' : ''}>${v ? v[0].toUpperCase() + v.slice(1) : 'Choose…'}</option>`).join('')}</select></div>${fld('count', 'Count / threshold note')}</div>`;
   } else if (d.type === 'irrigation') {
     specific = `<div class="g2">${fld('minutes', 'Run time (min)', 'inputmode="decimal"')}${fld('m3', 'Volume (m³)', 'inputmode="decimal"')}</div>`;
@@ -514,7 +553,9 @@ function vRecord() {
   <div class="form">
     <div class="chips" role="group" aria-label="Record type">${types}</div>
     <div class="seg" role="group" aria-label="Status"><button type="button" class="${d.status === 'planned' ? 'on' : ''}" data-act="dstatus" data-v="planned" aria-pressed="${d.status === 'planned'}">Planned</button><button type="button" class="${d.status === 'done' ? 'on' : ''}" data-act="dstatus" data-v="done" aria-pressed="${d.status === 'done'}">Done</button></div>
-    <div class="g2">${fld('date', 'Date', '', 'date')}<div class="f"><label for="r_blockId">Block</label><select id="r_blockId" data-f="blockId">${blockOpts}</select></div></div>
+    <div class="g2">${fld('date', 'Date (first day)', '', 'date')}${fld('endDate', 'Last day (if longer)', '', 'date')}</div>
+    <div class="f"><label for="r_blockId">Block</label><select id="r_blockId" data-f="blockId">${blockOpts}</select></div>
+    ${d.endDate && d.endDate > d.date || (d.extLog || []).length ? `<div class="card" style="gap:6px"><span class="t">Work period${d.endDate > d.date ? `: ${fd(d.date)} – ${fd(d.endDate)} · ${diff(d.date, d.endDate) + 1} days` : ''}</span>${(d.extLog || []).map(x => `<span class="s">Extended on ${fd(x.on)}: ${fd(x.from)} → ${fd(x.to)}${x.why ? ' — ' + esc(x.why) : ''}</span>`).join('')}${d.doneOn ? `<span class="s">Marked done on ${fd(d.doneOn)}</span>` : ''}</div>` : ''}
     ${specific}
     <div class="f"><label for="r_notes">Notes</label><textarea id="r_notes" data-f="notes">${esc(d.notes)}</textarea></div>
     ${d.status === 'done' && (d.type === 'spray' || d.type === 'fertigation') ? `<p class="hint" style="margin:0">Saving as done deducts the amounts from stock.</p>` : ''}
@@ -606,10 +647,19 @@ function vPower() {
 function vSettings() {
   return `${back('#today', 'Today')}<h1>Settings</h1>
   <div class="card"><div class="f"><label for="set_name">Farm name</label><input id="set_name" value="${esc(db.settings.farmName)}"></div>
+    <div class="f"><label for="set_loc">Farm location</label><input id="set_loc" value="${esc(db.settings.location || '')}" placeholder="Town, region, country"><span class="hint">Sent with questions to Claude so advice fits your conditions.</span></div>
     <div class="f"><label for="set_tank">Default sprayer tank size (L)</label><input id="set_tank" inputmode="decimal" value="${esc(db.settings.tankL || '')}"></div>
     <div class="g2"><div class="f"><label for="set_sale">New sales in</label><select id="set_sale">${CURS.map(c => `<option ${(db.settings.saleCur || 'SLSH') === c ? 'selected' : ''}>${c}</option>`).join('')}</select></div><div class="f"><label for="set_buy">New expenses in</label><select id="set_buy">${CURS.map(c => `<option ${(db.settings.buyCur || 'USD') === c ? 'selected' : ''}>${c}</option>`).join('')}</select></div></div>
     <div class="f"><label for="set_rep">Show totals in (default)</label><select id="set_rep">${CURS.map(c => `<option ${(db.settings.repCur || 'USD') === c ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
     <button class="btn pri" data-act="savesettings">Save</button></div>
+  <div class="card"><span class="t">Ask Claude (photos &amp; advice)</span>
+    <div class="seg" role="group" aria-label="How to reach Claude"><button class="${(db.settings.aiMode || 'share') === 'share' ? 'on' : ''}" data-act="aimode" data-v="share" aria-pressed="${(db.settings.aiMode || 'share') === 'share'}">Claude app</button><button class="${db.settings.aiMode === 'api' ? 'on' : ''}" data-act="aimode" data-v="api" aria-pressed="${db.settings.aiMode === 'api'}">Built-in (API key)</button></div>
+    ${db.settings.aiMode !== 'api' ? `<span class="s">Your photos and question, with this farm's records, are sent to the Claude app on this phone. It uses your Claude plan — no extra charge. The answer stays in the Claude app.</span>` : `
+    <span class="s">Answers appear inside Farm Manager and can be saved to records. This uses the Claude API, which is <strong>paid per use and billed separately from your Claude plan</strong> (Max, Ultra and Team plans include monthly API credits). Create a key at platform.claude.com.</span>
+    <div class="f"><label for="set_key">API key</label><input id="set_key" type="password" autocomplete="off" placeholder="${getKey() ? 'Saved: …' + esc(getKey().slice(-4)) : 'sk-ant-…'}"></div>
+    <div class="f"><label for="set_model">Model</label><select id="set_model">${AI_MODELS.map(([v, l]) => `<option value="${v}" ${(db.settings.aiModel || AI_MODELS[0][0]) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="g3"><button class="btn sm pri" data-act="aisavekey">Save key</button><button class="btn sm" data-act="aitest">Test</button><button class="btn sm danger" data-act="aidelkey">Remove</button></div>
+    <span class="hint">The key is stored only on this phone and is never included in backups. Never upload it to GitHub. Set a monthly spend limit in the Claude Console.</span>`}</div>
   <a class="card" href="#lists" style="flex-direction:row;align-items:center"><span class="main"><span class="t">Lists &amp; categories</span><span class="s">Sales and expense categories, crops, units, payment methods, stock categories, irrigation types, activities</span></span>${ic('chev', 18, 2)}</a>
   <div class="card"><span class="t">Exchange rate history</span><span class="s">SLSH per 1 USD. Each transaction keeps the rate of its own date, so updating the rate never changes past figures.</span>
     ${rateCard(true)}
@@ -1103,6 +1153,172 @@ function vNewCycle(id) {
 }
 let ncdraft = null, ncdraftKey = null;
 
+/* ---------- Ask Claude: disease ID & advice ---------- */
+const AI_KEY = 'farmapp.apikey';          /* stored on this phone only, never in backups */
+const AI_MODELS = [['claude-sonnet-5-5', 'Claude Sonnet 5.5 (balanced)'], ['claude-opus-5-5', 'Claude Opus 5.5 (most capable, costs more)'], ['claude-haiku-5-5', 'Claude Haiku 5.5 (fastest, cheapest)']];
+const AI_KINDS = { diagnose: 'Identify a problem', nutrition: 'Nutrition advice', question: 'Other question' };
+const getKey = () => { try { return localStorage.getItem(AI_KEY) || ''; } catch (e) { return ''; } };
+const aiMode = () => db.settings.aiMode === 'api' && getKey() ? 'api' : 'share';
+function freshAI(q) {
+  return { blockId: (q && q.get('block')) || '', kind: (q && q.get('kind')) || 'diagnose', symptoms: (q && q.get('note')) ? 'Scouting note: ' + q.get('note') : '', photos: [], msgs: [], answer: '', busy: false, followup: '', usage: null, error: '' };
+}
+let ai = null, aiKey = null;
+
+const AI_SYSTEM = `You are an experienced field agronomist advising a commercial vegetable farmer. Be technically rigorous, practical and concise.
+Rules:
+- Rank likely causes and give a confidence (high / medium / low) for each, with the visible signs that support it. Say plainly when a photo cannot settle the question and what to check or photograph next.
+- Consider look-alikes: nutrient deficiency or toxicity, water stress, salinity, heat or sun scald, herbicide or spray injury, mechanical damage.
+- Prefer prevention and integrated pest and disease management. Put cultural and non-chemical actions first.
+- For chemical options, prefer products in the farmer's stock list and name the active ingredient and IRAC/FRAC group. Do not repeat the mode-of-action group used in the last spray on the block. Say "use the label rate" — never invent rates, pre-harvest intervals or product names. Point out pre-harvest interval and tank-mix concerns.
+- Separate what is confirmed from what is likely. If information is missing, say what you need.`;
+
+function farmContext(b) {
+  const t = today(), L1 = [];
+  L1.push(`Date: ${fdy(t)}. Farm: ${db.settings.farmName || 'farm'}${db.settings.location ? ', ' + db.settings.location : ''}.`);
+  if (b) {
+    const day = cropDay(b), st = currentStage(b);
+    L1.push(`Block: ${b.name}, ${fmt(num(b.areaHa))} ha${b.irrigation ? ', ' + b.irrigation + ' irrigation' : ''}.`);
+    L1.push(b.crop ? `Crop: ${b.crop}${b.variety ? ' (' + b.variety + ')' : ''}, planted ${fdy(b.planted)}${day != null ? `, crop day ${day}` : ''}${st ? `, stage: ${st.name}` : ''}.` : 'No crop recorded on this block.');
+    const recs = db.records.filter(r => r.blockId === b.id && r.status === 'done' && r.date >= curFrom(b)).sort(byDateDesc).slice(0, 8);
+    if (recs.length) {
+      L1.push('Recent records on this block (newest first):');
+      recs.forEach(r => {
+        const prods = (r.lines || []).map(l => { const s = stockById(l.stockId); return s ? `${s.name}${s.ai ? ' [' + s.ai + ']' : ''}${s.group ? ' ' + s.group : ''}` : ''; }).filter(Boolean).join(' + ');
+        L1.push(`- ${r.date} ${r.type === 'activity' ? r.activity : TYPES[r.type] || r.type}${prods ? ': ' + prods : ''}${r.target ? ' — target: ' + r.target : ''}${r.severity ? ', pressure ' + r.severity : ''}${num(r.phiDays) ? ', PHI ' + r.phiDays + ' d' : ''}${r.notes ? ' — ' + r.notes.replace(/\s+/g, ' ').slice(0, 140) : ''}`);
+      });
+    }
+    const ls = lastSprays(b.id, null, t);
+    if (ls.length) L1.push(`Last spray groups on this block: ${ls.map(x => `${x.date} ${x.g.join(', ') || 'no group recorded'}`).join('; ')}.`);
+    const pe = phiEnd(b); if (pe) L1.push(`Pre-harvest interval active until ${fdy(pe)}.`);
+  }
+  const cp = db.stock.filter(s => num(s.qty) > 0 && !stockFlags(s).includes('expired'));
+  const prot = cp.filter(s => (stockCat(s.category) || {}).use !== 'fertigation');
+  const fert = cp.filter(s => (stockCat(s.category) || {}).use === 'fertigation' || (stockCat(s.category) || {}).use === 'both');
+  L1.push(prot.length ? 'Crop-protection stock on hand:\n' + prot.map(s => `- ${s.name}${s.ai ? ' [' + s.ai + ']' : ''}${s.group ? ' ' + s.group : ''}: ${qtyStr(s)}${s.phiDays ? ', label PHI ' + s.phiDays + ' d' : ''}`).join('\n') : 'No crop-protection products in stock.');
+  if (fert.length) L1.push('Fertilisers on hand:\n' + fert.map(s => `- ${s.name}${s.ai ? ' [' + s.ai + ']' : ''}: ${qtyStr(s)}`).join('\n'));
+  return L1.join('\n');
+}
+function taskText(a) {
+  const n = a.photos.length;
+  const head = a.kind === 'diagnose'
+    ? `Please identify the problem${n ? ` in the ${n} photo${n > 1 ? 's' : ''}` : ''} and advise. Answer with: 1) likely causes ranked with confidence; 2) what to check in the field to confirm; 3) immediate cultural / non-chemical actions; 4) treatment options from my stock if justified (active ingredient, group, label rate, PHI); 5) when to re-check.`
+    : a.kind === 'nutrition'
+      ? `Please advise on nutrition / fertigation for this crop and stage using the fertilisers I have${n ? ', and assess the photo(s) for deficiency symptoms versus other causes' : ''}. If you give amounts, show your assumptions so I can check them against my soil and water tests.`
+      : 'Question:';
+  return `${head}\n\nWhat I see / my question:\n${a.symptoms.trim() || '(no description given)'}`;
+}
+const firstPrompt = a => `${taskText(a)}\n\n--- Farm records ---\n${farmContext(blockById(a.blockId))}`;
+const sharePrompt = a => `${AI_SYSTEM}\n\n${firstPrompt(a)}`;
+
+/* resize a photo to max 1568 px (long edge) as JPEG */
+function loadPhoto(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const max = 1568, k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      const dataUrl = c.toDataURL('image/jpeg', 0.85);
+      c.toBlob(blob => res({ dataUrl, b64: dataUrl.split(',')[1], file: new File([blob], (file.name || 'photo').replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg' }) }), 'image/jpeg', 0.85);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Could not read that image.')); };
+    img.src = url;
+  });
+}
+function mdLite(s) {
+  const lines = esc(s).split('\n'); let out = '', inList = false;
+  const inline = x => x.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  for (const ln of lines) {
+    const m = ln.match(/^\s*([-*•]|\d+[.)])\s+(.*)/);
+    if (m) { if (!inList) { out += '<ul style="margin:4px 0;padding-left:20px">'; inList = true; } out += `<li style="margin:3px 0">${inline(m[2])}</li>`; continue; }
+    if (inList) { out += '</ul>'; inList = false; }
+    const h = ln.match(/^#{1,4}\s+(.*)/);
+    if (h) out += `<p style="margin:10px 0 4px;font-weight:700">${inline(h[1])}</p>`;
+    else if (ln.trim()) out += `<p style="margin:4px 0">${inline(ln)}</p>`;
+  }
+  if (inList) out += '</ul>';
+  return out;
+}
+function vAI() {
+  const a = ai; if (!a) return vMissing();
+  const mode = aiMode();
+  const blockOpts = `<option value="">No block (general)</option>` + db.blocks.map(b => `<option value="${b.id}" ${b.id === a.blockId ? 'selected' : ''}>${esc(blockLabel(b))}</option>`).join('');
+  const photos = a.photos.map((p, i) => `<div style="position:relative;width:88px;height:88px;flex:none"><img src="${p.dataUrl}" alt="Photo ${i + 1}" style="width:88px;height:88px;object-fit:cover;border-radius:10px;border:1px solid var(--line)"><button type="button" class="ib" data-act="aidelphoto" data-i="${i}" aria-label="Remove photo ${i + 1}" style="position:absolute;top:-8px;right:-8px;width:32px;height:32px;border-radius:50%;background:#fff">${'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>'}</button></div>`).join('');
+  const convo = a.msgs.filter(m => m.role === 'assistant' || m.display).map(m => m.role === 'assistant'
+    ? `<div class="card" style="gap:4px;font-size:14px;line-height:1.5">${mdLite(m.text)}</div>`
+    : `<div style="align-self:flex-end;max-width:85%;background:var(--accbg);color:var(--acc2);border-radius:12px;padding:10px 12px;font-size:14px;white-space:pre-wrap">${esc(m.display)}</div>`).join('');
+  return `${back('#today', 'Today')}<h1>Ask Claude</h1>
+  <p class="hint" style="margin:-8px 0 0">${mode === 'api' ? 'Answers appear here (uses your API key).' : 'Sends your photos and question to the Claude app, with your farm records attached.'} <a href="#settings">Change</a></p>
+  ${a.msgs.length ? '' : `<div class="form">
+    <div class="chips" role="group" aria-label="Type of question">${Object.entries(AI_KINDS).map(([k, l]) => `<button type="button" class="chip ${a.kind === k ? 'on' : ''}" data-act="aikind" data-v="${k}" aria-pressed="${a.kind === k}">${l}</button>`).join('')}</div>
+    <div class="f"><label for="ai_block">Block</label><select id="ai_block" data-af="blockId">${blockOpts}</select><span class="hint">The crop, stage, recent sprays and your stock are added automatically.</span></div>
+    <div class="f"><span class="lbl">Photos (up to 4)</span>
+      <div class="row" style="gap:12px">${photos}${a.photos.length < 4 ? `<label for="ai_photo" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0">${'<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>'}Add photo</label>` : ''}</div>
+      <input id="ai_photo" type="file" accept="image/*" multiple class="sr">
+      <span class="hint">Take a close-up of the affected leaf (top and underside), plus one of the whole plant.</span></div>
+    <div class="f"><label for="ai_sym">${a.kind === 'question' ? 'Your question' : 'What do you see?'}</label><textarea id="ai_sym" data-af="symptoms" placeholder="${a.kind === 'diagnose' ? 'e.g. Yellow patches on older leaves, brown spots with rings, spreading over 5 days, about 20% of plants' : a.kind === 'nutrition' ? 'e.g. Plan fertigation for the next 2 weeks; leaves look pale' : 'Type your question'}">${esc(a.symptoms)}</textarea></div>
+    ${mode === 'api'
+      ? `<button class="btn pri block" data-act="aisend" ${a.busy ? 'disabled' : ''}>${a.busy ? 'Asking Claude…' : 'Ask Claude'}</button>`
+      : `<button class="btn pri block" data-act="aishare">Send to Claude app</button>
+         <div class="g2"><button class="btn" data-act="aicopy">Copy question</button><a class="btn" href="https://claude.ai/new" target="_blank" rel="noopener">Open Claude</a></div>
+         <span class="hint">If the photos arrive without the text, paste — the question is copied for you. After Claude answers, you can paste the advice into a scouting record.</span>`}
+    <details><summary class="s" style="cursor:pointer;min-height:44px;display:flex;align-items:center">See what will be sent</summary><pre style="white-space:pre-wrap;font-size:12px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:320px;overflow:auto">${esc(firstPrompt(a))}</pre></details>
+  </div>`}
+  ${convo ? `<div class="col" style="gap:10px">${a.photos.length ? `<div class="row" style="gap:8px">${a.photos.map((p, i) => `<img src="${p.dataUrl}" alt="Photo ${i + 1}" style="width:56px;height:56px;object-fit:cover;border-radius:8px">`).join('')}</div>` : ''}${convo}</div>` : ''}
+  ${a.error ? alertH('bad', 'warn', a.error, '') : ''}
+  ${a.busy && a.msgs.length ? `<div class="empty">Claude is thinking…</div>` : ''}
+  ${a.msgs.length && !a.busy ? `<div class="form">
+    <div class="f"><label for="ai_follow">Follow-up question</label><textarea id="ai_follow" data-af="followup" placeholder="e.g. Which of my products is safest 3 days before harvest?">${esc(a.followup)}</textarea></div>
+    <button class="btn pri" data-act="aifollow">Send follow-up</button>
+    <div class="g2"><button class="btn" data-act="aisave">Save to scouting record</button><button class="btn" data-act="ainew">New question</button></div>
+    ${a.usage ? `<span class="hint">Tokens used: ${a.usage.in} in · ${a.usage.out} out</span>` : ''}
+    <p class="hint" style="margin:0">AI advice can be wrong. Confirm in the field, and always follow the product label for rates, PHI and safety.</p></div>` : ''}`;
+}
+async function callClaude(messages, maxTokens = 2000) {
+  const key = getKey();
+  if (!key) throw new Error('Add your API key in Settings first.');
+  if (navigator.onLine === false) throw new Error('No internet connection.');
+  const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 120000);
+  let res;
+  try {
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', signal: ctl.signal,
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: db.settings.aiModel || AI_MODELS[0][0], max_tokens: maxTokens, system: AI_SYSTEM, messages })
+    });
+  } catch (e) { clearTimeout(tm); throw new Error(e.name === 'AbortError' ? 'Claude took too long to answer. Try again.' : 'Could not reach Claude. Check your internet connection.'); }
+  clearTimeout(tm);
+  let data = null; try { data = await res.json(); } catch (e) { }
+  if (!res.ok) {
+    const msg = (data && data.error && data.error.message) || res.statusText || 'Unknown error';
+    if (res.status === 401) throw new Error('The API key was rejected. Check it in Settings.');
+    if (res.status === 429) throw new Error('Too many requests right now. Wait a minute and try again.');
+    if (res.status === 529 || res.status === 503) throw new Error('Claude is busy right now. Try again shortly.');
+    throw new Error(`Claude returned an error (${res.status}): ${msg}`);
+  }
+  const text = ((data && data.content) || []).filter(c => c.type === 'text').map(c => c.text).join('\n').trim();
+  return { text: text || '(empty answer)', usage: data.usage ? { in: data.usage.input_tokens, out: data.usage.output_tokens } : null };
+}
+function apiMessages(a) {
+  return a.msgs.map((m, i) => {
+    if (m.role === 'user' && i === 0) return { role: 'user', content: [...a.photos.map(p => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: p.b64 } })), { type: 'text', text: m.text }] };
+    return { role: m.role, content: m.text };
+  });
+}
+async function runAI() {
+  const a = ai; a.busy = true; a.error = ''; render();
+  try {
+    const r = await callClaude(apiMessages(a));
+    a.msgs.push({ role: 'assistant', text: r.text });
+    if (r.usage) a.usage = { in: (a.usage ? a.usage.in : 0) + r.usage.in, out: (a.usage ? a.usage.out : 0) + r.usage.out };
+  } catch (e) {
+    a.error = e.message;
+    if (a.msgs.length && a.msgs[a.msgs.length - 1].role === 'user') { const u = a.msgs.pop(); if (a.msgs.length === 0) a.symptoms = a.symptoms || ''; else a.followup = u.text; }
+  }
+  a.busy = false; if (route().parts[0] === 'ai') render();
+}
+
 /* ---------- router & render ---------- */
 function route() {
   const h = decodeURIComponent(location.hash.slice(1)) || 'today';
@@ -1112,6 +1328,7 @@ function route() {
 function render(resetScroll) {
   const { parts, q } = route();
   const v = parts[0];
+  if (v !== 'ai' && v !== 'settings') aiKey = null;
   let html, tab = v;
   switch (v) {
     case 'today': html = vToday(); break;
@@ -1141,6 +1358,9 @@ function render(resetScroll) {
     case 'debts': if (resetScroll && q.get('tab')) ui.dtab = q.get('tab') === 'pay' ? 'pay' : 'recv'; html = vDebts(); tab = 'money'; break;
     case 'reports': html = vReports(); tab = 'money'; break;
     case 'lists': html = vLists(); tab = 'today'; break;
+    case 'ai':
+      if (aiKey !== location.hash || !ai) { ai = freshAI(q); aiKey = location.hash; }
+      html = vAI(); tab = 'today'; break;
     case 'list':
       if (ldraftKey !== location.hash) { ldraft = initLDraft(parts[1]); ldraftKey = location.hash; }
       html = vListEdit(parts[1]); tab = 'today'; break;
@@ -1163,6 +1383,56 @@ const go = h => { location.hash = h; };
 const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
 const ACTS = {
   period: el => { ui[el.dataset.k] = el.dataset.v; render(); },
+  aimode: el => { db.settings.aiMode = el.dataset.v; save(); render(); },
+  aisavekey: () => {
+    const k = val('set_key');
+    if (!k) return toast('Paste your API key first.');
+    if (!/^sk-ant-/.test(k)) toast('That does not look like a Claude API key (they start with sk-ant-). Saved anyway.');
+    try { localStorage.setItem(AI_KEY, k); } catch (e) { return toast('Could not save the key on this device.'); }
+    db.settings.aiModel = val('set_model') || AI_MODELS[0][0]; save(); toast('Key saved on this phone'); render();
+  },
+  aidelkey: async () => { if (!await ask('Remove the API key from this phone?', 'Remove')) return; try { localStorage.removeItem(AI_KEY); } catch (e) { } toast('Key removed'); render(); },
+  aitest: async () => {
+    db.settings.aiModel = val('set_model') || db.settings.aiModel || AI_MODELS[0][0]; save();
+    toast('Testing…');
+    try { await callClaude([{ role: 'user', content: 'Reply with the single word OK.' }], 10); toast('Connected to Claude ✓'); }
+    catch (e) { toast(e.message); }
+  },
+  aikind: el => { ai.kind = el.dataset.v; render(); },
+  aidelphoto: el => { ai.photos.splice(+el.dataset.i, 1); render(); },
+  aisend: () => {
+    if (!ai.symptoms.trim() && !ai.photos.length) return toast('Add a photo or describe what you see.');
+    ai.msgs = [{ role: 'user', text: firstPrompt(ai), display: (ai.symptoms.trim() || 'Please look at the photos.') + (ai.photos.length ? `\n📷 ${ai.photos.length} photo${ai.photos.length > 1 ? 's' : ''}` : '') }];
+    runAI();
+  },
+  aifollow: () => {
+    const f = ai.followup.trim(); if (!f) return toast('Type your follow-up question.');
+    ai.msgs.push({ role: 'user', text: f, display: f }); ai.followup = ''; runAI();
+  },
+  aishare: async () => {
+    if (!ai.symptoms.trim() && !ai.photos.length) return toast('Add a photo or describe what you see.');
+    const text = sharePrompt(ai);
+    let copied = false; try { await navigator.clipboard.writeText(text); copied = true; } catch (e) { }
+    const files = ai.photos.map(p => p.file);
+    try {
+      if (navigator.share && (!files.length || (navigator.canShare && navigator.canShare({ files })))) {
+        await navigator.share(files.length ? { text, files } : { text });
+        toast(copied ? 'Pick Claude. The question is also copied — paste it if it does not appear.' : 'Pick Claude in the list.');
+      } else {
+        window.open('https://claude.ai/new', '_blank', 'noopener');
+        toast(copied ? 'Question copied. Paste it into Claude and attach your photos.' : 'Open Claude and describe the problem.');
+      }
+    } catch (e) { if (e.name !== 'AbortError') toast('Sharing failed. Use Copy question, then Open Claude.'); }
+  },
+  aicopy: async () => { try { await navigator.clipboard.writeText(sharePrompt(ai)); toast('Question copied. Paste it into Claude.'); } catch (e) { toast('Could not copy on this device.'); } },
+  aisave: async () => {
+    const ans = ai.msgs.filter(m => m.role === 'assistant').map(m => m.text).join('\n\n---\n\n');
+    const found = await askText('What was found? (short, e.g. Early blight)');
+    if (!found) return;
+    db.records.push({ id: uid(), created: Date.now(), type: 'scouting', status: 'done', date: today(), blockId: ai.blockId, title: '', target: found, lines: [], waterLha: '', tankL: '', phiDays: '', ec: '', ph: '', severity: '', count: '', minutes: '', m3: '', notes: (ai.symptoms.trim() ? 'Seen: ' + ai.symptoms.trim() + '\n\n' : '') + 'Claude advice:\n' + ans, used: null });
+    save(); toast('Saved as a scouting record'); go(ai.blockId ? '#block/' + ai.blockId : '#records');
+  },
+  ainew: () => { const b = ai.blockId; ai = freshAI(null); ai.blockId = b; render(true); },
   dact: el => { draft.type = 'activity'; draft.activity = el.dataset.v; draft.lines = []; render(); },
   newact: async () => { const n = await askText('New activity type', 'e.g. Staking'); if (!n) return; if (!L('activities').some(a => a.toLowerCase() === n.toLowerCase())) { db.lists.activities.push(n); save(); } draft.type = 'activity'; draft.activity = L('activities').find(a => a.toLowerCase() === n.toLowerCase()); draft.lines = []; render(); },
   lup: el => { const i = +el.dataset.i; if (i > 0) { [ldraft[i - 1], ldraft[i]] = [ldraft[i], ldraft[i - 1]]; render(); } },
@@ -1243,6 +1513,12 @@ const ACTS = {
     db.txns = db.txns.filter(t => t.id !== tdraft.id); save(); tdraftKey = null; toast('Transaction deleted'); go('#money');
   },
   goback: () => { draftKey = null; if (history.length > 1) history.back(); else go('#records'); },
+  extend: async el => {
+    const r = db.records.find(x => x.id === el.dataset.id); if (!r) return;
+    const x = await askExtend(r); if (!x) return;
+    r.extLog = r.extLog || []; r.extLog.push({ on: today(), from: recEnd(r), to: x.to, why: x.why });
+    r.endDate = x.to; save(); toast(`Extended to ${fd(x.to)} · ${recDays(r)} days in total`); render();
+  },
   bfilter: el => { ui.bfilter = el.dataset.v; render(); },
   bscope: el => { ui.bscope = el.dataset.v; render(); },
   ncnext: el => { ncdraft.next = el.dataset.v; render(); },
@@ -1288,6 +1564,9 @@ const ACTS = {
   saverec: async () => {
     const d = draft;
     if (!d.date) return toast('Enter a date.');
+    if (d.endDate && d.endDate < d.date) return toast('The last day is before the first day.');
+    if (d.endDate === d.date) d.endDate = '';
+    if (d.status === 'done' && !d.doneOn) d.doneOn = today();
     if (!(d.type === 'task' || d.type === 'other' || d.type === 'activity') && !d.blockId) return toast('Choose a block.');
     if ((d.type === 'task' || d.type === 'other') && !d.title.trim()) return toast('Describe the task.');
     const rec = JSON.parse(JSON.stringify(d));
@@ -1381,7 +1660,7 @@ const ACTS = {
     save(); toast('Log saved'); render();
   },
   delpower: async el => { if (!await ask('Delete this log?')) return; db.power = db.power.filter(p => p.id !== el.dataset.id); save(); render(); },
-  savesettings: () => { db.settings.farmName = val('set_name') || 'My farm'; db.settings.tankL = val('set_tank'); db.settings.saleCur = val('set_sale'); db.settings.buyCur = val('set_buy'); db.settings.repCur = val('set_rep'); ui.rcur = db.settings.repCur; save(); toast('Settings saved'); render(); },
+  savesettings: () => { db.settings.farmName = val('set_name') || 'My farm'; db.settings.location = val('set_loc'); db.settings.tankL = val('set_tank'); db.settings.saleCur = val('set_sale'); db.settings.buyCur = val('set_buy'); db.settings.repCur = val('set_rep'); ui.rcur = db.settings.repCur; save(); toast('Settings saved'); render(); },
   export: () => {
     try {
       const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' });
@@ -1411,6 +1690,10 @@ document.addEventListener('change', e => {
     setDone(r, el.checked); save();
     toast(el.checked ? 'Done' + (r.used && r.used.length ? ' · stock updated' : '') : 'Moved back to planned');
     render();
+  } else if (el.id === 'set_model') { db.settings.aiModel = el.value; save();
+  } else if (el.id === 'ai_photo' && el.files && el.files.length && ai) {
+    const fl = [...el.files].slice(0, 4 - ai.photos.length);
+    Promise.all(fl.map(f => loadPhoto(f).catch(() => null))).then(ps => { const ok = ps.filter(Boolean); ai.photos.push(...ok); if (ok.length < fl.length) toast('One photo could not be read.'); render(); });
   } else if (el.id === 'importFile' && el.files && el.files[0]) {
     const fr = new FileReader();
     fr.onload = async () => {
@@ -1428,6 +1711,7 @@ document.addEventListener('focusin', e => { const el = e.target; if (el.tagName 
 document.addEventListener('input', e => {
   const el = e.target;
   if (el.tagName === 'SELECT' && el.dataset.list && el.value === '__new__') { e.stopImmediatePropagation(); addFromSelect(el); return; }
+  if (el.dataset.af !== undefined && ai) { ai[el.dataset.af] = el.value; return; }
   if (el.dataset.lk !== undefined && ldraft) { ldraft[+el.dataset.li][el.dataset.lk] = el.type === 'checkbox' ? el.checked : el.value; return; }
   if (el.id === 'debtq') { ui.dq = el.value; document.getElementById('debtlist').innerHTML = debtsListHtml(); return; }
   if (el.dataset.tf !== undefined && tdraft) {
@@ -1466,7 +1750,7 @@ document.addEventListener('input', e => {
 
 /* ---------- install & offline ---------- */
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (route().parts[0] === 'settings') render(); });
-if ('serviceWorker' in navigator && location.protocol === 'https:') {
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* preview hosts may block this */ }); });
 }
 
