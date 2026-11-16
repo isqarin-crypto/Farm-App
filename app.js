@@ -625,6 +625,7 @@ function vStockEdit(id) {
     ${inp('ai', 'Active ingredient & concentration / analysis')}
     <div class="g3">${inp('qty', 'Quantity', 'inputmode="decimal"')}<div class="f"><label for="s_unit">Unit</label><select id="s_unit" data-list="stockUnits">${opts('stockUnits', s.unit)}</select></div>${inp('reorderAt', 'Reorder at', 'inputmode="decimal"')}</div>
     <div class="g3">${inp('expiry', 'Expiry date', '', 'date')}${inp('phiDays', 'Label PHI (days)', 'inputmode="numeric"')}${inp('reiHours', 'Label REI (hours)', 'inputmode="numeric"')}</div>
+    ${labelCard(s)}
     <div class="f"><label for="s_label">From the label: crops it is registered for, rate, maximum applications, mixing warnings</label><textarea id="s_label" placeholder="Copy from the product label. The AI is told to use only what is written here.">${esc(s.label)}</textarea></div>
     ${inp('costPerUnit', `Unit cost (USD per ${esc(s.unit)})`, 'inputmode="decimal"')}
     <div class="f"><label for="s_notes">Notes (supplier, batch, label rate…)</label><textarea id="s_notes">${esc(s.notes)}</textarea></div>
@@ -1613,7 +1614,7 @@ function buildContext(a) {
     L1.push('== PRODUCT LABEL DATA (as the farmer copied it from the labels; a missing item is unknown, not zero) ==');
     if (T.has('pest')) {
       const prot = okS.filter(s => (stockCat(s.category) || {}).use !== 'fertigation');
-      L1.push(prot.length ? 'Crop-protection stock on hand:\n' + prot.map(s => `- ${s.name}${s.ai ? ' [' + s.ai + ']' : ''}${s.group ? ' ' + s.group : ''}: ${qtyStr(s)}${s.phiDays ? ', label PHI ' + s.phiDays + ' d' : ''}${s.reiHours ? ', REI ' + s.reiHours + ' h' : ''}${s.label ? ', label notes: ' + short(s.label) : ''}`).join('\n') : 'No crop-protection products in stock.');
+      L1.push(prot.length ? 'Crop-protection stock on hand:\n' + prot.map(s => `- ${s.name}${s.ai ? ' [' + s.ai + ']' : ''}${s.group ? ' ' + s.group : ''}: ${qtyStr(s)}${s.phiDays ? ', label PHI ' + s.phiDays + ' d' : ''}${s.reiHours ? ', REI ' + s.reiHours + ' h' : ''}${s.label ? ', label notes: ' + String(s.label).replace(/\s+/g, ' ').slice(0, 600) : ''}${(s.labelPhotos || []).length ? ' (label photo on file)' : ''}`).join('\n') : 'No crop-protection products in stock.');
       const exp = on.filter(s => stockFlags(s).includes('expired') && (stockCat(s.category) || {}).use !== 'fertigation');
       if (exp.length) L1.push('Expired, do not recommend: ' + exp.map(s => s.name).join(', ') + '.');
     }
@@ -1916,12 +1917,12 @@ const PH = {
   async stats() { const a = await this.all(); return { n: a.length, bytes: a.reduce((t, p) => t + (p.full || '').length + (p.thumb || '').length, 0) }; }
 };
 
-function procPhoto(file) {
+function procPhoto(file, maxFull = 1280, qFull = 0.74) {
   return new Promise((res, rej) => {
     const url = URL.createObjectURL(file), img = new Image();
     img.onload = () => {
       const mk = (max, q) => { const k = Math.min(1, max / Math.max(img.width, img.height)); const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(img.width * k)); c.height = Math.max(1, Math.round(img.height * k)); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', q); };
-      try { const full = mk(1280, 0.74), thumb = mk(420, 0.7); URL.revokeObjectURL(url); res({ full, thumb }); }
+      try { const full = mk(maxFull, qFull), thumb = mk(420, 0.7); URL.revokeObjectURL(url); res({ full, thumb }); }
       catch (e) { URL.revokeObjectURL(url); rej(e); }
     };
     img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Could not read that image.')); };
@@ -1973,6 +1974,8 @@ async function sweepPhotos() {
   try {
     if (db.settings.sample || !storageOK) return;
     const keep = new Set();
+    db.stock.forEach(s => (s.labelPhotos || []).forEach(p => keep.add(p)));
+    if (sdraft) sdraft.photos.forEach(p => keep.add(p));
     (db.issues || []).forEach(i => { (i.photos || []).forEach(p => keep.add(p)); (i.updates || []).forEach(u => (u.photos || []).forEach(p => keep.add(p))); });
     const all = await PH.all();
     for (const p of all) if (!keep.has(p.id) && Date.now() - (p.created || 0) > 864e5) await PH.del(p.id);
@@ -2162,6 +2165,14 @@ const REPORT_CSS = `.report{background:#fff;color:#111;font-family:system-ui,-ap
 .report .fu{border-left:3px solid #2F6B3A;padding:2px 0 2px 10px;margin:8px 0;break-inside:avoid}
 .report .foot{margin-top:18px;font-size:11px;color:#666;border-top:1px solid #C9CFC3;padding-top:6px}
 @media print{@page{size:A4;margin:14mm}html,body{background:#fff!important}nav.tabs,.noprint,.toast{display:none!important}main{max-width:none!important;padding:0!important;display:block!important}.report{border:0;border-radius:0;padding:0}.issue{break-inside:auto}}`;
+/* photo and timeline styles live here too, so they work even if index.html on the site is an older copy */
+(function () { const s = document.createElement('style'); s.id = 'healthcss'; s.textContent = `.ph{padding:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#EEF0EA;display:block;width:100%;aspect-ratio:1;cursor:pointer;position:relative;font:inherit;flex:none}
+.ph img{width:100%;height:100%;max-width:100%;object-fit:cover;display:block}
+.ph.miss{display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--mut);text-align:center}
+.pgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tl{border-left:2px solid var(--line);padding-left:14px;margin-left:6px;display:flex;flex-direction:column;gap:16px}
+.tl>div{position:relative;display:flex;flex-direction:column;gap:6px}
+.tl>div::before{content:"";position:absolute;left:-21px;top:4px;width:10px;height:10px;border-radius:50%;background:var(--acc)}`; document.head.appendChild(s); })();
 (function () { const s = document.createElement('style'); s.id = 'reportcss'; s.textContent = REPORT_CSS; document.head.appendChild(s); })();
 
 let rdraft = null, rdraftKey = null;
@@ -2292,6 +2303,7 @@ function render(resetScroll) {
   const { parts, q } = route();
   const v = parts[0];
   if (v !== 'ai' && v !== 'settings') aiKey = null;
+  if (v !== 'stockedit') sdraftKey = null;
   let html, tab = v;
   switch (v) {
     case 'today': html = vToday(); break;
@@ -2562,8 +2574,9 @@ const ACTS = {
     const form = document.getElementById('stockform'), id = form.dataset.id;
     const s = { name: val('s_name'), category: val('s_category'), group: val('s_group'), ai: val('s_ai'), qty: num(val('s_qty')), unit: val('s_unit'), reorderAt: val('s_reorderAt') === '' ? '' : num(val('s_reorderAt')), expiry: val('s_expiry'), phiDays: val('s_phiDays'), reiHours: val('s_reiHours'), label: val('s_label'), costPerUnit: val('s_costPerUnit') === '' ? '' : num(val('s_costPerUnit')), notes: val('s_notes') };
     if (!s.name) return toast('Enter the product name.');
+    if (sdraft) { s.labelPhotos = sdraft.photos.slice(); sdraft.removed.forEach(x => PH.del(x)); }
     if (id) Object.assign(stockById(id), s); else db.stock.push({ id: uid(), ...s });
-    save(); toast('Stock item saved'); go('#stock');
+    sdraftKey = null; save(); toast('Stock item saved'); go('#stock');
   },
   recvstock: () => {
     const s = stockById(document.getElementById('stockform').dataset.id), a = num(val('s_recv'));
@@ -2582,7 +2595,8 @@ const ACTS = {
     const id = document.getElementById('stockform').dataset.id;
     const used = db.records.some(r => (r.lines || []).some(l => l.stockId === id));
     if (!await ask(used ? 'This product appears in records. Delete it anyway? Those records will show no product name.' : 'Delete this stock item?')) return;
-    db.stock = db.stock.filter(s => s.id !== id); save(); toast('Item deleted'); go('#stock');
+    ((stockById(id) || {}).labelPhotos || []).forEach(x => PH.del(x)); if (sdraft) sdraft.fresh.forEach(x => PH.del(x));
+    db.stock = db.stock.filter(s => s.id !== id); sdraftKey = null; save(); toast('Item deleted'); go('#stock');
   },
   savepower: () => {
     const date = val('p_date'); if (!date) return toast('Enter a date.');
@@ -2733,6 +2747,86 @@ Object.assign(ACTS, {
     idraft = d; idraftKey = '#issueedit/new?from=ai'; go('#issueedit/new?from=ai');
   }
 });
+/* ---------- stock label photos: keep the label, let the AI transcribe it once ---------- */
+let sdraft = null, sdraftKey = null;
+const LABEL_SYS = 'You transcribe agricultural product labels (pesticides, fertilisers, seeds). Report only what is printed and legible in the photos. Never fill a gap from memory or general knowledge. Use null for anything not shown or not legible. Reply with one JSON object and nothing else.';
+const LABEL_PROMPT = 'Read this product label and return JSON with exactly these keys: "product_name", "active_ingredient" (with concentration or analysis, as printed), "moa_group" (IRAC / FRAC / HRAC group exactly as printed, else null), "formulation", "registered_crops" (text), "rates" (text, with units and crop where given), "phi" (text: pre-harvest interval per crop as printed), "phi_days" (a number only if the label gives one single PHI, else null), "rei_hours" (number, else null), "max_applications" (text), "mixing_and_warnings" (short text), "expiry_date" (YYYY-MM-DD only if a full date is printed, else null), "batch" , "not_legible" (text listing important parts you could not read).';
+function labelStrip() {
+  const d = sdraft, x14 = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  const tiles = d.photos.map((id, k) => `<div style="position:relative;width:88px;height:88px;flex:none"><button type="button" class="ph" data-act="photo" data-pid="${esc(id)}" data-cap="Product label" aria-label="Open label photo ${k + 1}" style="width:88px;height:88px">${phImg(id, 'thumb', 'Label photo ' + (k + 1))}</button><button type="button" class="ib" data-act="labeldel" data-pid="${esc(id)}" aria-label="Remove label photo ${k + 1}" style="position:absolute;top:-8px;right:-8px;width:32px;height:32px;border-radius:50%;background:#fff">${x14}</button></div>`).join('');
+  const add = d.photos.length < 3 ? `<label for="sl_cam" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0;flex:none">${ic('plus', 20, 2)}Camera</label><label for="sl_gal" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0;flex:none">${ic('plus', 20, 2)}Gallery</label>` : '';
+  return `<div class="row" style="gap:12px">${tiles}${add}</div><input id="sl_cam" type="file" accept="image/*" capture="environment" class="sr"><input id="sl_gal" type="file" accept="image/*" multiple class="sr">
+    ${d.photos.length ? `<button type="button" class="btn" data-act="labelread">${ic('search', 18, 2)}Read the label with AI and fill in this form</button>` : ''}
+    <span class="hint">Photograph the label flat, in good light, close enough that the small print is sharp: the front, and the panel with crops, rates and PHI. Up to 3 photos, kept on this phone and in backups.</span>`;
+}
+function labelCard(s) {
+  if (sdraftKey !== location.hash) { sdraft = { photos: [...(s.labelPhotos || [])], fresh: [], removed: [] }; sdraftKey = location.hash; }
+  return `<div class="f"><span class="lbl">Label photos</span><div id="s_photos" class="col" style="gap:10px">${labelStrip()}</div><div id="s_readout"></div></div>`;
+}
+function redrawLabel() { const c = document.getElementById('s_photos'); if (c) { c.innerHTML = labelStrip(); hydratePhotos(); } }
+async function addLabelPhotos(files) {
+  let bad = 0;
+  for (const f of files) {
+    if (sdraft.photos.length >= 3) { toast('Up to 3 label photos.'); break; }
+    try { const p = await procPhoto(f, 1800, 0.82); const id = 'ph' + uid(); await PH.put({ id, full: p.full, thumb: p.thumb, created: Date.now() }); sdraft.photos.push(id); sdraft.fresh.push(id); }
+    catch (e) { if (e && e.name === 'QuotaExceededError') { toast('This phone has no space left for photos.'); break; } bad++; }
+  }
+  if (bad) toast('A photo could not be read.');
+  redrawLabel();
+}
+function fillFromLabel(j) {
+  const t = v => v == null ? '' : String(v).trim(), kept = [], filled = [];
+  const put = (id, v, label) => { const el = document.getElementById(id); v = t(v); if (!el || !v) return; if (el.value.trim() && el.value.trim() !== v) { kept.push(label); return; } el.value = v; el.style.outline = '2px solid var(--warn)'; filled.push(label); };
+  put('s_name', j.product_name, 'name'); put('s_ai', [t(j.active_ingredient), t(j.formulation)].filter(Boolean).join(' '), 'active ingredient'); put('s_group', j.moa_group, 'group');
+  if (j.phi_days != null && !isNaN(+j.phi_days)) put('s_phiDays', +j.phi_days, 'PHI'); if (j.rei_hours != null && !isNaN(+j.rei_hours)) put('s_reiHours', +j.rei_hours, 'REI');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t(j.expiry_date))) put('s_expiry', j.expiry_date, 'expiry');
+  const notes = [['Registered crops', j.registered_crops], ['Rates', j.rates], ['PHI', j.phi], ['Maximum applications', j.max_applications], ['Mixing and warnings', j.mixing_and_warnings], ['Batch', j.batch], ['Could not be read', j.not_legible]].filter(x => t(x[1])).map(x => `${x[0]}: ${t(x[1])}`).join('\n');
+  const lb = document.getElementById('s_label');
+  if (lb && notes) { lb.value = (lb.value.trim() ? lb.value.trim() + '\n\n' : '') + `[Read from the label photo by AI on ${fdy(today())}]\n` + notes; lb.style.outline = '2px solid var(--warn)'; lb.style.minHeight = '220px'; filled.push('label notes'); }
+  const out = document.getElementById('s_readout');
+  if (out) out.innerHTML = alertH('', 'warn', filled.length ? 'Filled in from the label photo — check before saving' : 'Nothing new could be read from the photo', (filled.length ? `Outlined fields were read by AI: ${filled.join(', ')}. Compare each one with the label, correct any mistake, then tap Save item.` : 'Try a sharper, closer photo.') + (kept.length ? ` Your existing ${kept.join(', ')} ${kept.length > 1 ? 'were' : 'was'} left unchanged because the AI read something different.` : '') + (t(j.not_legible) ? ` Not legible: ${esc(t(j.not_legible))}` : ''));
+}
+Object.assign(ACTS, {
+  labeldel: async el => {
+    const id = el.dataset.pid; sdraft.photos = sdraft.photos.filter(x => x !== id);
+    if (sdraft.fresh.includes(id)) { sdraft.fresh = sdraft.fresh.filter(x => x !== id); await PH.del(id); } else sdraft.removed.push(id);
+    redrawLabel();
+  },
+  labelread: async el => {
+    if (!sdraft || !sdraft.photos.length) return toast('Add a photo of the label first.');
+    const imgs = [];
+    for (const id of sdraft.photos) { const r = await PH.get(id); if (r) imgs.push({ b64: r.full.split(',')[1], w: 1800, h: 1350, dataUrl: r.full }); }
+    if (!imgs.length) return toast('The label photo is not stored on this phone.');
+    if (db.settings.aiMode !== 'api' || !usableModels().length) {
+      const files = imgs.map((i, k) => toFile(i.b64, `label-${k + 1}.jpg`)), text = LABEL_SYS + '\n\n' + LABEL_PROMPT.replace('return JSON with exactly these keys', 'list these items') ;
+      try { await navigator.clipboard.writeText(text); } catch (e) { }
+      try { if (navigator.share && navigator.canShare && navigator.canShare({ files })) { await navigator.share({ text, files }); return toast('Pick your chat app, then type what it reads into this form. For automatic filling, set up Built-in AI in Settings.'); } } catch (e) { if (e.name === 'AbortError') return; }
+      return toast('Automatic reading needs Built-in AI with a photo-capable model (Settings → AI assistant).');
+    }
+    const rt = pickRoute({ model: '', msgs: [], photos: imgs, kind: 'question', symptoms: '' });
+    if (!rt) return toast('Add an AI provider and model in Settings first.');
+    const { p, m } = rt;
+    if (!m.vision && !await ask(`${m.id} is not marked as able to read photos. Send anyway?`, 'Send anyway')) return;
+    const tin = 450 + imgs.length * 4300, cost = m.in !== '' && m.in != null && m.out !== '' && m.out != null ? (tin * num(m.in) + 500 * num(m.out)) / 1e6 : null;
+    if (AIS().askPhotos !== false && !await ask(`Send ${imgs.length} label photo${imgs.length > 1 ? 's' : ''} to ${p.name} (${hostOf(p.base)}) using ${m.id}? Estimated cost: ${cost == null ? 'unknown (no prices set)' : usd(cost)}.`, 'Send')) return;
+    const g = budgetGate({ tin, cost: null }); if (g.block) return toast(g.block);
+    if (el.disabled) return; el.disabled = true; el.textContent = 'Reading the label…';
+    try {
+      const r = await callAI(p, m, LABEL_SYS, [{ role: 'user', text: LABEL_PROMPT, images: imgs }], 900);
+      logUsage(p, m, r.usage, 'label'); budgetNotice();
+      const a = r.text.indexOf('{'), z = r.text.lastIndexOf('}'); let j = null;
+      try { j = JSON.parse(r.text.slice(a, z + 1)); } catch (e) { }
+      if (!j) { const out = document.getElementById('s_readout'); if (out) out.innerHTML = `<div class="card" style="font-size:13px"><span class="t">The AI answered, but not in the expected form. Copy what you need by hand:</span>${mdLite(r.text)}</div>`; }
+      else fillFromLabel(j);
+    } catch (e) { toast(e.message); }
+    const b2 = document.querySelector('[data-act=labelread]'); if (b2) { b2.disabled = false; b2.innerHTML = `${ic('search', 18, 2)}Read the label again`; }
+  }
+});
+document.addEventListener('change', e => {
+  const el = e.target;
+  if ((el.id === 'sl_cam' || el.id === 'sl_gal') && sdraft && el.files && el.files.length) addLabelPhotos([...el.files]);
+});
+
 /* ---------- AI actions ---------- */
 function tinyTestImage() {
   const c = document.createElement('canvas'); c.width = 64; c.height = 64; const x = c.getContext('2d');
