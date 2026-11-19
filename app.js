@@ -1,6 +1,7 @@
 'use strict';
 /* Farm Manager — offline single-phone farm records. Data lives in this browser's localStorage. */
 
+const APP_VERSION = '17';
 const KEY = 'farmapp.v1';
 const app = document.getElementById('app');
 
@@ -64,6 +65,9 @@ function normalize(d) {
   if (!Array.isArray(d.issues)) d.issues = [];
   d.issues.forEach(i => { if (!Array.isArray(i.photos)) i.photos = []; if (!Array.isArray(i.updates)) i.updates = []; i.updates.forEach(u => { if (!Array.isArray(u.photos)) u.photos = []; }); if (!i.status) i.status = 'active'; });
   normalizeLists(d);
+  /* repair: an older version had a selector that could mark a chemical category as fertiliser or "other" */
+  const CHEM_RE = /insecti|fungi|herbi|acari|miti|nemati|bacteri|pesticid|chemical|larvici|molluscic/i;
+  (d.lists.stockCats || []).forEach(c => { if (CHEM_RE.test(c.name || '') && c.use !== 'spray' && c.use !== 'both') c.use = 'spray'; if (/fertili[sz]er/i.test(c.name || '') && c.use !== 'fertigation' && c.use !== 'both') c.use = 'fertigation'; });
   if (aiReady) ensureAI(d);
   return d;
 }
@@ -621,12 +625,18 @@ function vStockEdit(id) {
   return `${back('#stock', 'Stock')}<h1>${s.id ? esc(s.name) : 'New stock item'}</h1>
   <div class="form" id="stockform" data-id="${s.id || ''}">
     ${inp('name', 'Product name (as on label)')}
-    <div class="g2"><div class="f"><label for="s_category">Category</label><select id="s_category" data-list="stockCats">${stockCatOpts(s.category)}</select></div>${inp('group', 'IRAC / FRAC / HRAC group', 'placeholder="e.g. IRAC 28"')}</div>
-    ${inp('ai', 'Active ingredient & concentration / analysis')}
+    <div class="f"><label for="s_category">Category</label><select id="s_category" data-list="stockCats">${stockCatOpts(s.category)}</select></div>
+    <div class="f"><label for="s_ai" id="s_ai_lbl">Active ingredient &amp; concentration</label><input id="s_ai" value="${esc(s.ai)}" autocomplete="off"></div>
+    <div data-for="chem" class="col" style="gap:14px">
+      ${inp('group', 'IRAC / FRAC / HRAC group', 'placeholder="e.g. IRAC 28 or FRAC 3"')}
+      <div class="g2">${inp('phiDays', 'Label PHI (days)', 'inputmode="numeric" placeholder="days before harvest"')}${inp('reiHours', 'Label REI (hours)', 'inputmode="numeric" placeholder="hours before re-entry"')}</div></div>
+    <div data-for="fert" class="g2">
+      <div class="f"><label for="s_form">Form</label><select id="s_form"><option value="">Choose…</option>${FERT_FORMS.map(f => `<option ${s.form === f ? 'selected' : ''}>${f}</option>`).join('')}</select></div>
+      ${inp('solub', 'Solubility', 'placeholder="e.g. 400 g/L at 20 °C"')}</div>
     <div class="g3">${inp('qty', 'Quantity', 'inputmode="decimal"')}<div class="f"><label for="s_unit">Unit</label><select id="s_unit" data-list="stockUnits">${opts('stockUnits', s.unit)}</select></div>${inp('reorderAt', 'Reorder at', 'inputmode="decimal"')}</div>
-    <div class="g3">${inp('expiry', 'Expiry date', '', 'date')}${inp('phiDays', 'Label PHI (days)', 'inputmode="numeric"')}${inp('reiHours', 'Label REI (hours)', 'inputmode="numeric"')}</div>
+    ${inp('expiry', 'Expiry date', '', 'date')}
     ${labelCard(s)}
-    <div class="f"><label for="s_label">From the label: crops it is registered for, rate, maximum applications, mixing warnings</label><textarea id="s_label" placeholder="Copy from the product label. The AI is told to use only what is written here.">${esc(s.label)}</textarea></div>
+    <div class="f"><label for="s_label" id="s_label_lbl">From the label</label><textarea id="s_label" placeholder="Copy from the product label, or use Read the label. The AI is told to use only what is written here.">${esc(s.label)}</textarea></div>
     ${inp('costPerUnit', `Unit cost (USD per ${esc(s.unit)})`, 'inputmode="decimal"')}
     <div class="f"><label for="s_notes">Notes (supplier, batch, label rate…)</label><textarea id="s_notes">${esc(s.notes)}</textarea></div>
     <button class="btn pri block" data-act="savestock">Save item</button>
@@ -683,7 +693,7 @@ function vSettings() {
     <label class="btn" for="importFile">Restore from backup file</label><input id="importFile" type="file" accept=".json,application/json" class="sr"></div>
   ${installEvt ? `<div class="card"><span class="t">Install</span><span class="s">Add Farm Manager to your home screen so it opens like an app and works offline.</span><button class="btn pri" data-act="install">Install app</button></div>` : ''}
   <div class="card"><span class="t">Data</span>
-    <span class="s">${db.blocks.length} blocks · ${db.records.length} records · ${db.stock.length} stock items · ${db.txns.length} transactions · ${(db.rates || []).length} rates · ${db.power.length} power logs · ${(db.issues || []).length} plant-health problems</span>
+    <span class="s">${db.blocks.length} blocks · ${db.records.length} records · ${db.stock.length} stock items · ${db.txns.length} transactions · ${(db.rates || []).length} rates · ${db.power.length} power logs · ${(db.issues || []).length} plant-health problems · app version ${APP_VERSION}</span>
     <span class="s" id="persist">Checking storage…</span>
     ${db.settings.sample ? `<button class="btn pri" data-act="clearall">Clear sample data and start fresh</button>` : `<button class="btn" data-act="loadsample">Load sample data</button>`}
     ${db.settings.sample ? '' : `<button class="btn danger" data-act="clearall">Erase all data on this phone</button>`}</div>
@@ -783,7 +793,7 @@ async function addFromSelect(el) {
   let value = name;
   if (key === 'stockCats') {
     const ex = stockCats().find(c => c.name.toLowerCase() === name.toLowerCase());
-    if (ex) value = ex.id; else { value = 'c' + uid(); db.lists.stockCats.push({ id: value, name, use: 'spray', expCat: L('expenseCats').includes('Crop protection') ? 'Crop protection' : L('expenseCats')[0] }); toast('Added. Set what it is used in under Settings → Lists.'); }
+    if (ex) value = ex.id; else { const u = guessUse(name); value = 'c' + uid(); db.lists.stockCats.push({ id: value, name, use: u, expCat: u === 'fertigation' && L('expenseCats').includes('Fertiliser') ? 'Fertiliser' : u === 'none' ? (L('expenseCats').includes('Other expense') ? 'Other expense' : L('expenseCats')[0]) : (L('expenseCats').includes('Crop protection') ? 'Crop protection' : L('expenseCats')[0]) }); toast(`Added as ${USE_NAMES[u].toLowerCase()}. If that is wrong, change it in Settings → Lists → Stock categories.`); }
   } else {
     const ex = L(key).find(n => n.toLowerCase() === name.toLowerCase());
     if (ex) value = ex; else db.lists[key].push(key === 'incomeCats' ? { name, sale: false } : name);
@@ -1798,13 +1808,15 @@ function aiSettingsCard() {
     <span class="s">Answers appear inside Farm Manager. This uses provider APIs, which are <strong>paid per use and billed separately from any chat subscription</strong>.</span>
     <span class="s">${n ? `${n} provider${n > 1 ? 's' : ''} set up · ${ready ? 'default model: ' + esc(rt ? rt.m.id : '—') : '<span class="neg">no API key saved yet</span>'} · this month about ${usd(sp.cost)}` : '<span class="neg">No provider set up yet.</span>'}</span>
     <a class="btn pri" href="#aiset">Providers, models &amp; routing</a><a class="btn" href="#aiusage">Usage &amp; budget</a>`}
+    ${!api ? `<span class="s">Reading stock labels inside the app needs an API key ${usableModels().some(x => x.m.vision) ? '— <strong>set up ✓</strong>' : ''}. <a href="#aiset">Set up keys</a></span>` : ''}
     <span class="hint">Questions about your own records (last spray, crop age, stock, money) are always answered on the phone with no AI: ${A.localCount || 0} so far.</span></div>`;
 }
 const refSelect = (tier, cur) => `<div class="f"><label for="rt_${tier}">${TIERS[tier]}</label><select id="rt_${tier}" data-ar="${tier}"><option value="">${tier === 'routine' ? 'Choose a model…' : 'Same as everyday'}</option>${allModels().map(x => `<option value="${esc(x.ref)}" ${cur === x.ref ? 'selected' : ''}>${esc(x.m.id)} — ${esc(x.p.name)}${keyOf(x.p.id) ? '' : ' (no key)'}${x.m.vision ? ' · photos' : ''}</option>`).join('')}</select></div>`;
+const backToLabel = () => sdraft && sdraft.keep && sdraft.back ? `<a class="btn pri block" href="${esc(sdraft.back)}">${ic('back', 18, 2)}Back to the stock item${usableModels().some(x => x.m.vision) ? ' — ready to read the label' : ''}</a>` : '';
 function vAISet() {
   const A = AIS();
   const ck = (k, label, def) => `<label class="row" style="gap:10px;min-height:44px;font-size:14px"><input type="checkbox" class="check" data-as="${k}" ${(A[k] === undefined ? def : A[k]) ? 'checked' : ''}>${label}</label>`;
-  return `${back('#settings', 'Settings')}<h1>AI providers</h1>
+  return `${backToLabel()}${back('#settings', 'Settings')}<h1>AI providers</h1>
   <div class="list">${A.providers.map(p => `<a class="item" href="#aiprov/${p.id}"><span class="main"><span class="t">${esc(p.name)}</span><span class="s">${esc(hostOf(p.base))} · ${p.models.length} model${p.models.length === 1 ? '' : 's'}</span></span><span class="badge ${keyOf(p.id) ? 'b-ok' : 'b-warn'}">${keyOf(p.id) ? 'Key saved' : 'No key'}</span>${ic('chev', 18, 2)}</a>`).join('') || '<div class="item"><span class="s">No providers yet. Add one below.</span></div>'}</div>
   <div class="card"><div class="f"><label for="ai_newprov">Add a provider</label><select id="ai_newprov">${Object.entries(PRESETS).map(([k, P]) => `<option value="${k}">${esc(P.name)}</option>`).join('')}</select></div><button class="btn pri" data-act="aiaddprov">Add</button>
     <span class="hint">You can add several and switch between them. Any service with an OpenAI-style API works through "Custom".</span></div>
@@ -1826,7 +1838,7 @@ function vAIProv(id) {
   const P = PRESETS[p.preset] || PRESETS.custom, key = keyOf(p.id), fl = fetched[p.id];
   const num1 = (i, k, label, v) => `<div class="f"><label for="m${k}${i}">${label}</label><input id="m${k}${i}" inputmode="decimal" data-pm="${i}" data-k="${k}" value="${esc(v)}"></div>`;
   const cb = (i, k, label, v) => `<label class="row" style="gap:6px;font-size:13px;min-height:40px"><input type="checkbox" class="check" data-pm="${i}" data-k="${k}" ${v ? 'checked' : ''}>${label}</label>`;
-  return `${back('#aiset', 'AI providers')}<h1>${esc(p.name)}</h1>
+  return `${backToLabel()}${back('#aiset', 'AI providers')}<h1>${esc(p.name)}</h1>
   <div class="card">
     <div class="f"><label for="pv_name">Name</label><input id="pv_name" data-pf="name" value="${esc(p.name)}"></div>
     <div class="f"><label for="pv_base">API address (endpoint)</label><input id="pv_base" data-pf="base" value="${esc(p.base)}" placeholder="https://…/v1" autocapitalize="off" autocomplete="off" spellcheck="false">
@@ -2303,7 +2315,7 @@ function render(resetScroll) {
   const { parts, q } = route();
   const v = parts[0];
   if (v !== 'ai' && v !== 'settings') aiKey = null;
-  if (v !== 'stockedit') sdraftKey = null;
+  if (v !== 'stockedit' && !(sdraft && sdraft.keep && ['aiset', 'aiprov', 'aiusage', 'settings'].includes(v))) { if (sdraft) sdraft.keep = false; sdraftKey = null; }
   let html, tab = v;
   switch (v) {
     case 'today': html = vToday(); break;
@@ -2360,6 +2372,7 @@ function render(resetScroll) {
   app.innerHTML = `<main>${html}</main><nav class="tabs" aria-label="Main">${t.map(([k, l, i]) => `<a href="#${k}" class="${tab === k ? 'on' : ''}" ${tab === k ? 'aria-current="page"' : ''}>${ic(i)}${l}</a>`).join('')}</nav>`;
   if (resetScroll) window.scrollTo(0, 0);
   hydratePhotos();
+  if (v === 'stockedit') stockFormInit();
   if (v === 'settings') {
     const pi = document.getElementById('photoinfo');
     if (pi) PH.stats().then(x => { pi.textContent = x.n ? `${x.n} photo${x.n > 1 ? 's' : ''} stored on this phone (about ${Math.max(1, Math.round(x.bytes / 1048576))} MB).` : 'No photos stored yet.'; });
@@ -2574,7 +2587,9 @@ const ACTS = {
     const form = document.getElementById('stockform'), id = form.dataset.id;
     const s = { name: val('s_name'), category: val('s_category'), group: val('s_group'), ai: val('s_ai'), qty: num(val('s_qty')), unit: val('s_unit'), reorderAt: val('s_reorderAt') === '' ? '' : num(val('s_reorderAt')), expiry: val('s_expiry'), phiDays: val('s_phiDays'), reiHours: val('s_reiHours'), label: val('s_label'), costPerUnit: val('s_costPerUnit') === '' ? '' : num(val('s_costPerUnit')), notes: val('s_notes') };
     if (!s.name) return toast('Enter the product name.');
-    if (sdraft) { s.labelPhotos = sdraft.photos.slice(); sdraft.removed.forEach(x => PH.del(x)); }
+    const ut = useOf(s.category);
+    if (ut === 'fertigation') { s.group = ''; s.phiDays = ''; s.reiHours = ''; s.form = val('s_form'); s.solub = val('s_solub'); } else { s.form = ''; s.solub = ''; }
+    if (sdraft) { s.labelPhotos = sdraft.photos.slice(); sdraft.removed.forEach(x => PH.del(x)); sdraft.keep = false; }
     if (id) Object.assign(stockById(id), s); else db.stock.push({ id: uid(), ...s });
     sdraftKey = null; save(); toast('Stock item saved'); go('#stock');
   },
@@ -2747,10 +2762,43 @@ Object.assign(ACTS, {
     idraft = d; idraftKey = '#issueedit/new?from=ai'; go('#issueedit/new?from=ai');
   }
 });
+/* ---------- stock form: fields follow the category type ---------- */
+const USE_NAMES = { spray: 'Crop protection (chemical)', fertigation: 'Fertiliser', both: 'Both (e.g. foliar feed)', none: 'Other (seed, tools…)' };
+const FERT_FORMS = ['Water-soluble powder / crystals', 'Liquid', 'Granular', 'Organic / manure', 'Other'];
+const useOf = catId => { const c = stockCat(catId) || {}, n = c.name || ''; if (/insecti|fungi|herbi|acari|miti|nemati|bacteri|pesticid|chemical/i.test(n)) return 'spray'; return c.use === 'fertigation' || /fertili[sz]er|fertigation/i.test(n) || c.id === 'fertiliser' ? 'fertigation' : (c.use || 'spray'); };
+const guessUse = n => /fert|npk|nitrat|urea|potash|potassium|phosph|sulphat|sulfat|calcium|magnes|micro|trace|chelat|humic|amino|seaweed|nutri|manure|compost|map\b|mkp|dap|can\b/i.test(n) ? 'fertigation' : /seed|tool|pipe|drip|fitting|fuel|diesel|bag|crate|tape|mulch|net|spare|part/i.test(n) ? 'none' : 'spray';
+function applyStockType() {
+  const sel = document.getElementById('s_category'); if (!sel) return;
+  /* only Fertiliser has its own page; every other category uses the chemical page */
+  const u = useOf(sel.value), fert = u === 'fertigation', chem = !fert;
+  document.querySelectorAll('#stockform [data-for=chem]').forEach(e => { e.style.display = chem ? '' : 'none'; });
+  document.querySelectorAll('#stockform [data-for=fert]').forEach(e => { e.style.display = fert ? '' : 'none'; });
+  const cu = document.getElementById('s_catuse'); if (cu) cu.value = u;
+  const cn = document.getElementById('s_catname'); if (cn) cn.textContent = `"${(stockCat(sel.value) || {}).name || 'This category'}" is treated as`;
+  const T = (id, t) => { const e = document.getElementById(id); if (e) e.textContent = t; };
+  T('s_ai_lbl', fert ? 'Nutrient analysis (as on the label)' : 'Active ingredient & concentration');
+  const ai = document.getElementById('s_ai'); if (ai) ai.placeholder = fert ? 'e.g. 15-5-30 + 2 MgO + TE, or CaO 26.5% N 15.5%' : 'e.g. Abamectin 18 g/L EC';
+  T('s_label_lbl', fert ? 'From the label: guaranteed analysis, recommended rates, what not to mix with (e.g. calcium with sulphates or phosphates)' : 'From the label: crops it is registered for, rates, PHI per crop, maximum applications, mixing warnings');
+}
+function stockFormInit() {
+  if (sdraft && sdraft.vals) { Object.entries(sdraft.vals).forEach(([id, v]) => { const e = document.getElementById(id); if (e) e.value = v; }); delete sdraft.vals; sdraft.keep = false; }
+  applyStockType();
+}
+document.addEventListener('input', e => { if (e.target.id === 's_category') applyStockType(); });
+document.addEventListener('change', e => {
+  if (e.target.id === 's_category') applyStockType();
+  if (e.target.id === 's_catuse') { const c = stockCat(val('s_category')); if (!c) return; c.use = e.target.value; save(); applyStockType(); toast(`All items in "${c.name}" are now treated as ${USE_NAMES[c.use].toLowerCase()}.`); }
+});
+
 /* ---------- stock label photos: keep the label, let the AI transcribe it once ---------- */
 let sdraft = null, sdraftKey = null;
 const LABEL_SYS = 'You transcribe agricultural product labels (pesticides, fertilisers, seeds). Report only what is printed and legible in the photos. Never fill a gap from memory or general knowledge. Use null for anything not shown or not legible. Reply with one JSON object and nothing else.';
-const LABEL_PROMPT = 'Read this product label and return JSON with exactly these keys: "product_name", "active_ingredient" (with concentration or analysis, as printed), "moa_group" (IRAC / FRAC / HRAC group exactly as printed, else null), "formulation", "registered_crops" (text), "rates" (text, with units and crop where given), "phi" (text: pre-harvest interval per crop as printed), "phi_days" (a number only if the label gives one single PHI, else null), "rei_hours" (number, else null), "max_applications" (text), "mixing_and_warnings" (short text), "expiry_date" (YYYY-MM-DD only if a full date is printed, else null), "batch" , "not_legible" (text listing important parts you could not read).';
+const LABEL_KEYS = {
+  chem: '"product_name", "active_ingredient" (with concentration, as printed), "moa_group" (IRAC / FRAC / HRAC group exactly as printed, else null), "formulation", "registered_crops" (text), "rates" (text, with units and crop where given), "phi" (text: pre-harvest interval per crop as printed), "phi_days" (a number only if the label gives one single PHI, else null), "rei_hours" (number, else null), "max_applications" (text), "mixing_and_warnings" (short text)',
+  fert: '"product_name", "analysis" (guaranteed analysis exactly as printed: N, P2O5, K2O, secondary and micronutrients with % and form, e.g. nitrate / ammoniacal / chelate type), "form" (one of: powder, liquid, granular, organic, other), "solubility" (as printed, with temperature), "rates" (text: fertigation / foliar / soil rates with units and crop where given), "ec_or_ph" (any EC or pH information printed), "mixing_and_warnings" (compatibility and storage warnings, short text)'
+};
+const labelPrompt = t => `Read this product label and return JSON with exactly these keys: ${t === 'fert' ? LABEL_KEYS.fert : t === 'both' ? LABEL_KEYS.chem + ', "analysis"' : LABEL_KEYS.chem}, "expiry_date" (YYYY-MM-DD only if a full date is printed, else null), "batch", "not_legible" (text listing important parts you could not read).`;
+const LABEL_PROMPT = labelPrompt('chem');
 function labelStrip() {
   const d = sdraft, x14 = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
   const tiles = d.photos.map((id, k) => `<div style="position:relative;width:88px;height:88px;flex:none"><button type="button" class="ph" data-act="photo" data-pid="${esc(id)}" data-cap="Product label" aria-label="Open label photo ${k + 1}" style="width:88px;height:88px">${phImg(id, 'thumb', 'Label photo ' + (k + 1))}</button><button type="button" class="ib" data-act="labeldel" data-pid="${esc(id)}" aria-label="Remove label photo ${k + 1}" style="position:absolute;top:-8px;right:-8px;width:32px;height:32px;border-radius:50%;background:#fff">${x14}</button></div>`).join('');
@@ -2777,16 +2825,29 @@ async function addLabelPhotos(files) {
 function fillFromLabel(j) {
   const t = v => v == null ? '' : String(v).trim(), kept = [], filled = [];
   const put = (id, v, label) => { const el = document.getElementById(id); v = t(v); if (!el || !v) return; if (el.value.trim() && el.value.trim() !== v) { kept.push(label); return; } el.value = v; el.style.outline = '2px solid var(--warn)'; filled.push(label); };
-  put('s_name', j.product_name, 'name'); put('s_ai', [t(j.active_ingredient), t(j.formulation)].filter(Boolean).join(' '), 'active ingredient'); put('s_group', j.moa_group, 'group');
+  put('s_name', j.product_name, 'name');
+  const isF = useOf(val('s_category')) === 'fertigation';
+  put('s_ai', isF ? t(j.analysis) : [t(j.active_ingredient), t(j.formulation)].filter(Boolean).join(' ') || t(j.analysis), isF ? 'analysis' : 'active ingredient');
+  put('s_solub', j.solubility, 'solubility');
+  if (t(j.form)) { const f = { powder: FERT_FORMS[0], liquid: FERT_FORMS[1], granular: FERT_FORMS[2], organic: FERT_FORMS[3] }[t(j.form).toLowerCase().split(/[\s/]/)[0]] || ''; const fe = document.getElementById('s_form'); if (fe && f && !fe.value) { fe.value = f; fe.style.outline = '2px solid var(--warn)'; filled.push('form'); } } put('s_group', j.moa_group, 'group');
   if (j.phi_days != null && !isNaN(+j.phi_days)) put('s_phiDays', +j.phi_days, 'PHI'); if (j.rei_hours != null && !isNaN(+j.rei_hours)) put('s_reiHours', +j.rei_hours, 'REI');
   if (/^\d{4}-\d{2}-\d{2}$/.test(t(j.expiry_date))) put('s_expiry', j.expiry_date, 'expiry');
-  const notes = [['Registered crops', j.registered_crops], ['Rates', j.rates], ['PHI', j.phi], ['Maximum applications', j.max_applications], ['Mixing and warnings', j.mixing_and_warnings], ['Batch', j.batch], ['Could not be read', j.not_legible]].filter(x => t(x[1])).map(x => `${x[0]}: ${t(x[1])}`).join('\n');
+  const notes = [['Guaranteed analysis', isF ? '' : j.analysis], ['Registered crops', j.registered_crops], ['Rates', j.rates], ['EC / pH', j.ec_or_ph], ['Solubility', j.solubility], ['PHI', j.phi], ['Maximum applications', j.max_applications], ['Mixing and warnings', j.mixing_and_warnings], ['Batch', j.batch], ['Could not be read', j.not_legible]].filter(x => t(x[1])).map(x => `${x[0]}: ${t(x[1])}`).join('\n');
   const lb = document.getElementById('s_label');
   if (lb && notes) { lb.value = (lb.value.trim() ? lb.value.trim() + '\n\n' : '') + `[Read from the label photo by AI on ${fdy(today())}]\n` + notes; lb.style.outline = '2px solid var(--warn)'; lb.style.minHeight = '220px'; filled.push('label notes'); }
   const out = document.getElementById('s_readout');
   if (out) out.innerHTML = alertH('', 'warn', filled.length ? 'Filled in from the label photo — check before saving' : 'Nothing new could be read from the photo', (filled.length ? `Outlined fields were read by AI: ${filled.join(', ')}. Compare each one with the label, correct any mistake, then tap Save item.` : 'Try a sharper, closer photo.') + (kept.length ? ` Your existing ${kept.join(', ')} ${kept.length > 1 ? 'were' : 'was'} left unchanged because the AI read something different.` : '') + (t(j.not_legible) ? ` Not legible: ${esc(t(j.not_legible))}` : ''));
 }
+function labelRoute() {
+  const A = AIS(), ok = ref => { const r = resolveRef(ref); return r && keyOf(r.p.id) ? r : null; };
+  const v = ok(A.routes.vision), d = ok(A.routes.routine);
+  return (v && v.m.vision && v) || (d && d.m.vision && d) || usableModels().find(x => x.m.vision) || d || usableModels()[0] || null;
+}
 Object.assign(ACTS, {
+  labelsetup: () => {
+    sdraft.vals = {}; document.querySelectorAll('#stockform input[id^=s_]:not([type=file]), #stockform select[id^=s_], #stockform textarea[id^=s_]').forEach(e => { sdraft.vals[e.id] = e.value; });
+    sdraft.keep = true; sdraft.back = location.hash; go('#aiset');
+  },
   labeldel: async el => {
     const id = el.dataset.pid; sdraft.photos = sdraft.photos.filter(x => x !== id);
     if (sdraft.fresh.includes(id)) { sdraft.fresh = sdraft.fresh.filter(x => x !== id); await PH.del(id); } else sdraft.removed.push(id);
@@ -2797,28 +2858,27 @@ Object.assign(ACTS, {
     const imgs = [];
     for (const id of sdraft.photos) { const r = await PH.get(id); if (r) imgs.push({ b64: r.full.split(',')[1], w: 1800, h: 1350, dataUrl: r.full }); }
     if (!imgs.length) return toast('The label photo is not stored on this phone.');
-    if (db.settings.aiMode !== 'api' || !usableModels().length) {
-      const files = imgs.map((i, k) => toFile(i.b64, `label-${k + 1}.jpg`)), text = LABEL_SYS + '\n\n' + LABEL_PROMPT.replace('return JSON with exactly these keys', 'list these items') ;
-      try { await navigator.clipboard.writeText(text); } catch (e) { }
-      try { if (navigator.share && navigator.canShare && navigator.canShare({ files })) { await navigator.share({ text, files }); return toast('Pick your chat app, then type what it reads into this form. For automatic filling, set up Built-in AI in Settings.'); } } catch (e) { if (e.name === 'AbortError') return; }
-      return toast('Automatic reading needs Built-in AI with a photo-capable model (Settings → AI assistant).');
+    const rt = labelRoute();
+    if (!rt) {
+      const out = document.getElementById('s_readout');
+      if (out) out.innerHTML = `<div class="card" style="gap:8px"><span class="t">Set up AI reading once</span><span class="s">Reading a label inside the app needs an API key from an AI provider with a model that reads photos. It is paid per use: one label is usually well under one US cent. This does not change how you ask for advice.</span><button type="button" class="btn pri" data-act="labelsetup">Set up an AI key</button><span class="hint">Your form and photos are kept: you come straight back here.</span></div>`;
+      return;
     }
-    const rt = pickRoute({ model: '', msgs: [], photos: imgs, kind: 'question', symptoms: '' });
-    if (!rt) return toast('Add an AI provider and model in Settings first.');
     const { p, m } = rt;
     if (!m.vision && !await ask(`${m.id} is not marked as able to read photos. Send anyway?`, 'Send anyway')) return;
     const tin = 450 + imgs.length * 4300, cost = m.in !== '' && m.in != null && m.out !== '' && m.out != null ? (tin * num(m.in) + 500 * num(m.out)) / 1e6 : null;
     if (AIS().askPhotos !== false && !await ask(`Send ${imgs.length} label photo${imgs.length > 1 ? 's' : ''} to ${p.name} (${hostOf(p.base)}) using ${m.id}? Estimated cost: ${cost == null ? 'unknown (no prices set)' : usd(cost)}.`, 'Send')) return;
     const g = budgetGate({ tin, cost: null }); if (g.block) return toast(g.block);
     if (el.disabled) return; el.disabled = true; el.textContent = 'Reading the label…';
+    const ro = document.getElementById('s_readout'); if (ro) ro.innerHTML = `<div class="empty">Reading the label with ${esc(m.id)}…</div>`;
     try {
-      const r = await callAI(p, m, LABEL_SYS, [{ role: 'user', text: LABEL_PROMPT, images: imgs }], 900);
+      const ty = useOf(val('s_category')), r = await callAI(p, m, LABEL_SYS, [{ role: 'user', text: labelPrompt(ty === 'fertigation' ? 'fert' : 'chem'), images: imgs }], 900);
       logUsage(p, m, r.usage, 'label'); budgetNotice();
       const a = r.text.indexOf('{'), z = r.text.lastIndexOf('}'); let j = null;
       try { j = JSON.parse(r.text.slice(a, z + 1)); } catch (e) { }
       if (!j) { const out = document.getElementById('s_readout'); if (out) out.innerHTML = `<div class="card" style="font-size:13px"><span class="t">The AI answered, but not in the expected form. Copy what you need by hand:</span>${mdLite(r.text)}</div>`; }
       else fillFromLabel(j);
-    } catch (e) { toast(e.message); }
+    } catch (e) { const out = document.getElementById('s_readout'); if (out) out.innerHTML = alertH('bad', 'warn', 'The label could not be read', esc(e.message)); else toast(e.message); }
     const b2 = document.querySelector('[data-act=labelread]'); if (b2) { b2.disabled = false; b2.innerHTML = `${ic('search', 18, 2)}Read the label again`; }
   }
 });
