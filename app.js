@@ -1,7 +1,7 @@
 'use strict';
 /* Farm Manager — offline single-phone farm records. Data lives in this browser's localStorage. */
 
-const APP_VERSION = '17';
+const APP_VERSION = '18';
 const KEY = 'farmapp.v1';
 const app = document.getElementById('app');
 
@@ -914,6 +914,14 @@ function totals(list) {
   for (const t of list) { const v = toRep(t); if (v == null) { skipped++; continue; } if (t.kind === 'income') inc += v; else exp += v; }
   return { inc, exp, net: inc - exp, skipped };
 }
+/* sale deductions: transport, commission, unloading labour. t.amount stays the NET received, so cash, debts and margins are unchanged */
+const SALE_DED = [['transport', 'Transport'], ['commission', 'Commission'], ['unloading', 'Unloading labour']];
+const saleGross = t => num(t.gross) > 0 ? num(t.gross) : num(t.amount);
+const saleDed = t => SALE_DED.reduce((a, [k]) => a + num(t[k]), 0);
+function saleCalc(d) {
+  const g = num(d.gross), ded = saleDed(d);
+  return { g, ded, net: roundC(g - ded, d.currency || 'USD') };
+}
 function txnTitle(t) {
   if (isSaleCat(t.category) || (t.category === 'Crop sales' && num(t.qty))) { const b = blockById(t.blockId); return (t.category === 'Crop sales' ? 'Sale' : t.category) + (t.crop || (b && b.crop) ? ' · ' + (t.crop || b.crop) : '') + (num(t.qty) ? ` · ${fmt(num(t.qty))} ${t.unit}` : ''); }
   return t.category + (t.stockId && stockById(t.stockId) ? ' · ' + stockById(t.stockId).name : '');
@@ -921,7 +929,7 @@ function txnTitle(t) {
 function txnRow(t) {
   const bal = balanceOf(t), cur = t.currency || 'USD';
   const eq = cur !== ui.rcur ? toRep(t) : null;
-  const sub = [t.party, t.blockId ? (blockById(t.blockId) || {}).name : '', !t.credit && t.method ? t.method : '', t.credit ? (bal > 0 ? `${t.kind === 'income' ? 'Owes' : 'You owe'} ${money(bal, cur)}${t.due ? ' · due ' + fd(t.due) : ''}` : 'Credit · settled') : ''].filter(Boolean).join(' · ');
+  const sub = [t.party, saleDed(t) ? `net of ${money(saleDed(t), cur)} selling costs` : '', t.blockId ? (blockById(t.blockId) || {}).name : '', !t.credit && t.method ? t.method : '', t.credit ? (bal > 0 ? `${t.kind === 'income' ? 'Owes' : 'You owe'} ${money(bal, cur)}${t.due ? ' · due ' + fd(t.due) : ''}` : 'Credit · settled') : ''].filter(Boolean).join(' · ');
   return `<a class="item" href="#txn/${t.id}"><span class="date">${fd(t.date)}</span><span class="main"><span class="t">${esc(txnTitle(t))}</span><span class="s ${isOverdue(t) ? 'neg' : ''}">${esc(sub)}</span></span>
   <span class="col" style="align-items:flex-end;gap:2px"><span class="mono" style="font-size:15px;font-weight:600;white-space:nowrap;color:${t.kind === 'income' ? 'var(--acc)' : 'var(--ink)'}">${t.kind === 'income' ? '+' : '−'}${esc(money(t.amount, cur))}</span>${eq != null ? `<span class="mono s" style="font-size:11px;white-space:nowrap">≈ ${esc(money(eq))}</span>` : ''}</span></a>`;
 }
@@ -985,16 +993,24 @@ function vMoney() {
 }
 
 function initTDraft(id, q) {
-  if (id && id !== 'new') { const t = db.txns.find(x => x.id === id); return t ? Object.assign({ currency: 'USD', rate: '' }, JSON.parse(JSON.stringify(t))) : null; }
+  if (id && id !== 'new') { const t = db.txns.find(x => x.id === id); if (!t) return null; const d = Object.assign({ currency: 'USD', rate: '', transport: '', commission: '', commPct: '', unloading: '' }, JSON.parse(JSON.stringify(t))); if (isSaleCat(d.category) && !(num(d.gross) > 0)) d.gross = d.amount; return d; }
   const k = q.get('kind');
   const cur = k === 'expense' ? (db.settings.buyCur || 'USD') : (db.settings.saleCur || 'SLSH');
   const r = rateOn(today());
   return { id: null, kind: k === 'expense' ? 'expense' : 'income', category: k === 'expense' ? defaultExp() : k === 'income' ? firstNonSaleIncome() : firstSaleCat(), date: today(), currency: cur, rate: r ? String(r) : '', rateManual: false, amount: '', party: '', method: 'Cash', blockId: q.get('block') || '', crop: '', qty: '', unit: 'kg', price: '', credit: false, due: '', payments: [], notes: '', stockId: '' };
 }
 function txnEquivText(d) {
-  const other = d.currency === 'SLSH' ? 'USD' : 'SLSH';
-  const v = conv(d.amount, d.currency, other, num(d.rate));
-  return num(d.amount) ? (v == null ? 'Enter the rate to see the equivalent.' : `≈ ${money(v, other)} at ${fmtRate(d.rate)} SLSH/USD`) : '';
+  const other = d.currency === 'SLSH' ? 'USD' : 'SLSH', amt = isSaleCat(d.category) ? saleCalc(d).net : num(d.amount);
+  const v = conv(amt, d.currency, other, num(d.rate));
+  return amt ? (v == null ? 'Enter the rate to see the equivalent.' : `≈ ${money(v, other)} at ${fmtRate(d.rate)} SLSH/USD`) : '';
+}
+function saleNetHtml(d) {
+  const c = saleCalc(d), cur = d.currency || 'USD';
+  return `<div class="col" style="gap:4px;border-top:1px solid var(--line2);padding-top:10px">
+    <div class="between s"><span>Selling price</span><span class="mono">${money(c.g, cur)}</span></div>
+    <div class="between s"><span>Less transport, commission, unloading</span><span class="mono">− ${money(c.ded, cur)}</span></div>
+    <div class="between"><span class="t">Net received</span><span class="mono ${c.net < 0 ? 'neg' : ''}" style="font-weight:700">${money(c.net, cur)}</span></div>
+    ${num(d.qty) && c.g ? `<span class="s">Net per ${esc(d.unit || 'unit')}: ${money(c.net / num(d.qty), cur)}${c.g ? ` · selling costs ${fmt(c.ded / c.g * 100)}% of the price` : ''}</span>` : ''}</div>`;
 }
 function vTxn() {
   const d = tdraft; if (!d) return vMissing();
@@ -1003,7 +1019,7 @@ function vTxn() {
   const parties = [...new Set(db.txns.map(t => t.party).filter(Boolean))].sort();
   const fld = (f, label, extra = '', type = 'text') => `<div class="f"><label for="t_${f}">${label}</label><input id="t_${f}" type="${type}" data-tf="${f}" value="${esc(d[f])}" ${extra}></div>`;
   const blockOpts = `<option value="">${sale ? 'Choose block…' : 'Whole farm'}</option>` + db.blocks.map(b => `<option value="${b.id}" ${b.id === d.blockId ? 'selected' : ''}>${esc(blockLabel(b))}</option>`).join('');
-  const paid = paidOf(d), bal = Math.max(0, num(d.amount) - paid);
+  const paid = paidOf(d), bal = Math.max(0, (sale ? saleCalc(d).net : num(d.amount)) - paid);
   const pays = (d.payments || []).map((p, i) => `<div class="item"><span class="date">${fd(p.date)}</span><span class="main"><span class="t mono" style="font-size:13px">${money(p.amount, cur)}</span><span class="s">${esc(p.method || '')}</span></span><button class="btn sm danger" data-act="delpay" data-i="${i}" aria-label="Remove payment of ${money(p.amount, cur)}">Remove</button></div>`).join('');
   return `<a class="back" href="#money" data-act="tback">${ic('back', 18, 2)}Back</a><h1>${d.id ? 'Edit transaction' : sale ? 'New sale' : d.kind === 'income' ? 'New income' : 'New expense'}</h1>
   <div class="form">
@@ -1012,7 +1028,12 @@ function vTxn() {
     <div class="f"><span class="lbl">Currency</span><div class="seg" role="group" aria-label="Currency">${CURS.map(c => `<button type="button" class="${cur === c ? 'on' : ''}" data-act="tcur" data-v="${c}" aria-pressed="${cur === c}">${c === 'SLSH' ? 'Shilling (SLSH)' : 'Dollar (USD)'}</button>`).join('')}</div></div>
     ${sale ? `<div class="g2"><div class="f"><label for="t_blockId">Block</label><select id="t_blockId" data-tf="blockId">${blockOpts}</select></div><div class="f"><label for="t_crop">Crop</label><select id="t_crop" data-tf="crop" data-list="crops">${opts('crops', d.crop, (blockById(d.blockId) || {}).crop ? 'Block crop (' + blockById(d.blockId).crop + ')' : 'Not set')}</select></div></div>
       <div class="g3">${fld('qty', 'Quantity', 'inputmode="decimal"')}<div class="f"><label for="t_unit">Unit</label><select id="t_unit" data-tf="unit" data-list="saleUnits">${opts('saleUnits', d.unit)}</select></div>${fld('price', `Price / unit (${cur})`, 'inputmode="decimal"')}</div>` : ''}
-    ${fld('amount', `Amount (${cur})${sale ? ' — auto from qty × price' : ''}`, 'inputmode="decimal"')}
+    ${sale ? `${fld('gross', `Selling price, total (${cur}) — auto from qty × price`, 'inputmode="decimal"')}
+      <div class="card" style="gap:10px"><span class="t">Deducted from the selling price</span>
+        <div class="g2">${fld('transport', `Transport (${cur})`, 'inputmode="decimal" placeholder="0"')}${fld('unloading', `Unloading labour (${cur})`, 'inputmode="decimal" placeholder="0"')}</div>
+        <div class="g2">${fld('commPct', 'Commission (%)', 'inputmode="decimal" placeholder="e.g. 10"')}${fld('commission', `Commission (${cur})`, 'inputmode="decimal" placeholder="0"')}</div>
+        <span class="hint">Type the commission as a percentage of the selling price, or as an amount.</span>
+        <div id="t_net">${saleNetHtml(d)}</div></div>` : fld('amount', `Amount (${cur})`, 'inputmode="decimal"')}
     <div class="g2" style="align-items:end">${fld('rate', 'Rate (SLSH per 1 USD)', 'inputmode="decimal"')}<span class="hint mono" id="t_eq" style="padding-bottom:14px">${esc(txnEquivText(d))}</span></div>
     ${!(num(d.rate) > 0) ? `<span class="hint neg" style="margin-top:-8px">No rate on file for this date. Set one on the Money screen or type it here.</span>` : `<span class="hint" style="margin-top:-8px">Filled from your rate history for this date; you can change it to the rate actually used.</span>`}
     <div class="f"><label for="t_party">${d.kind === 'income' ? 'Customer' : 'Supplier / paid to'}</label><input id="t_party" data-tf="party" value="${esc(d.party)}" list="partylist" autocomplete="off"><datalist id="partylist">${parties.map(p => `<option value="${esc(p)}">`).join('')}</datalist></div>
@@ -1080,6 +1101,8 @@ function vReports() {
     <div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px" class="mono s">${months.map(m => `<span style="text-align:center;font-size:11px">${m.label}</span>`).join('')}</div></div>
   <div class="card"><span class="t">Costs by category</span>${bars(byCat('expense'), 'var(--sun)')}</div>
   <div class="card"><span class="t">Income by category</span>${bars(byCat('income'), 'var(--acc)')}</div>
+  ${(() => { const sl = list.filter(t => t.kind === 'income' && isSaleCat(t.category)); const conv_ = (t, v) => { const r = num(t.amount) ? toRep(t) : null; return r == null ? 0 : r * v / num(t.amount); }; const G = sl.reduce((a, t) => a + conv_(t, saleGross(t)), 0); if (!G) return ''; const D = SALE_DED.map(([k, l]) => [l, sl.reduce((a, t) => a + conv_(t, num(t[k])), 0)]), Dt = D.reduce((a, x) => a + x[1], 0);
+    return `<div class="card"><span class="t">Sales: selling price to net</span><div class="between s"><span>Selling price</span><span class="mono">${money(G)}</span></div>${D.map(([l, v]) => `<div class="between s"><span>Less ${l.toLowerCase()}</span><span class="mono">− ${money(v)}</span></div>`).join('')}<div class="between"><span class="t">Net sales</span><span class="mono" style="font-weight:700">${money(G - Dt)}</span></div><span class="hint">Selling costs are ${fmt(Dt / G * 100)}% of the selling price. Income above and block margins use the net amount.</span></div>`; })()}
   <div class="card"><span class="t">Margin by block</span>
     ${blocks.length ? blocks.map(({ b, f }) => `<div class="col" style="gap:4px;border-top:1px solid var(--line2);padding-top:10px">
       <div class="between"><span class="t">${esc(blockLabel(b))}</span><span class="mono ${f.margin < 0 ? 'neg' : ''}" style="font-weight:700">${money(f.margin)}</span></div>
@@ -1090,11 +1113,11 @@ function vReports() {
 }
 function exportCSV() {
   const q = v => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-  const head = ['date', 'type', 'category', 'amount', 'currency', 'rate_slsh_per_usd', 'amount_usd', 'amount_slsh', 'party', 'block', 'crop', 'qty', 'unit', 'price', 'payment', 'credit', 'paid', 'balance', 'due', 'notes'];
+  const head = ['date', 'type', 'category', 'amount', 'currency', 'rate_slsh_per_usd', 'amount_usd', 'amount_slsh', 'party', 'block', 'crop', 'qty', 'unit', 'price', 'selling_price', 'transport', 'commission', 'unloading', 'payment', 'credit', 'paid', 'balance', 'due', 'notes'];
   const rows = [...db.txns].sort(byDate).map(t => {
     const c = t.currency || 'USD', r = tRate(t);
     const usd = conv(t.amount, c, 'USD', r), sl = conv(t.amount, c, 'SLSH', r);
-    return [t.date, t.kind, t.category, num(t.amount), c, r || '', usd == null ? '' : Math.round(usd * 100) / 100, sl == null ? '' : Math.round(sl), t.party, (blockById(t.blockId) || {}).name || '', t.crop || (blockById(t.blockId) || {}).crop || '', t.qty, t.unit, t.price, t.credit ? '' : t.method, t.credit ? 'yes' : 'no', t.credit ? paidOf(t) : num(t.amount), balanceOf(t), t.due, t.notes].map(q).join(',');
+    return [t.date, t.kind, t.category, num(t.amount), c, r || '', usd == null ? '' : Math.round(usd * 100) / 100, sl == null ? '' : Math.round(sl), t.party, (blockById(t.blockId) || {}).name || '', t.crop || (blockById(t.blockId) || {}).crop || '', t.qty, t.unit, t.price, isSaleCat(t.category) ? saleGross(t) : '', t.transport || '', t.commission || '', t.unloading || '', t.credit ? '' : t.method, t.credit ? 'yes' : 'no', t.credit ? paidOf(t) : num(t.amount), balanceOf(t), t.due, t.notes].map(q).join(',');
   });
   const blob = new Blob([[head.join(','), ...rows].join('\n')], { type: 'text/csv' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `farm-transactions-${today()}.csv`;
@@ -2442,7 +2465,7 @@ const ACTS = {
   addpay: () => {
     const a = num(val('pay_amt'));
     if (!(a > 0)) return toast('Enter the payment amount.');
-    if (a > num(tdraft.amount) - paidOf(tdraft) + 0.005) return toast('Payment is more than the balance.');
+    if (a > (isSaleCat(tdraft.category) ? saleCalc(tdraft).net : num(tdraft.amount)) - paidOf(tdraft) + 0.005) return toast('Payment is more than the balance.');
     tdraft.payments = tdraft.payments || [];
     tdraft.payments.push({ id: uid(), date: val('pay_date') || today(), amount: a, method: val('pay_method') });
     render();
@@ -2452,7 +2475,13 @@ const ACTS = {
     const d = JSON.parse(JSON.stringify(tdraft));
     if (!d.date) return toast('Enter a date.');
     d.currency = d.currency === 'SLSH' ? 'SLSH' : 'USD';
-    d.amount = roundC(num(d.amount), d.currency);
+    if (isSaleCat(d.category)) {
+      if (!(num(d.gross) > 0)) return toast('Enter the selling price (or quantity and price per unit).');
+      SALE_DED.forEach(([k]) => { d[k] = num(d[k]) > 0 ? roundC(num(d[k]), d.currency) : ''; });
+      d.gross = roundC(num(d.gross), d.currency); d.commPct = num(d.commPct) > 0 ? num(d.commPct) : '';
+      d.amount = saleCalc(d).net;
+      if (!(d.amount > 0)) return toast('Transport, commission and unloading add up to more than the selling price.');
+    } else { d.amount = roundC(num(d.amount), d.currency); SALE_DED.forEach(([k]) => { delete d[k]; }); delete d.gross; delete d.commPct; }
     if (!(d.amount > 0)) return toast('Enter the amount.');
     d.rate = num(d.rate) > 0 ? num(d.rate) : '';
     if (d.currency === 'SLSH' && !d.rate) return toast('Enter the exchange rate for this shilling transaction.');
@@ -3078,12 +3107,16 @@ document.addEventListener('input', e => {
     if (f === 'category' || f === 'blockId') { render(); return; }
     if (f === 'rate') tdraft.rateManual = true;
     if (f === 'date' && !tdraft.rateManual && el.value) { const r = rateOn(el.value); if (r) { tdraft.rate = String(r); const ri = document.getElementById('t_rate'); if (ri) ri.value = tdraft.rate; } }
-    if ((f === 'qty' || f === 'price') && isSaleCat(tdraft.category) && num(tdraft.qty) && num(tdraft.price)) {
-      tdraft.amount = String(roundC(num(tdraft.qty) * num(tdraft.price), tdraft.currency));
-      const am = document.getElementById('t_amount'); if (am) am.value = tdraft.amount;
+    const setv = (k, v) => { tdraft[k] = v; const e = document.getElementById('t_' + k); if (e && e !== el) e.value = v; };
+    if ((f === 'qty' || f === 'price') && isSaleCat(tdraft.category) && num(tdraft.qty) && num(tdraft.price)) setv('gross', String(roundC(num(tdraft.qty) * num(tdraft.price), tdraft.currency)));
+    if (isSaleCat(tdraft.category)) {
+      if (f === 'commission') tdraft.commPct = '', (document.getElementById('t_commPct') || {}).value = '';
+      else if (num(tdraft.commPct) > 0 && ['commPct', 'gross', 'qty', 'price'].includes(f)) setv('commission', String(roundC(num(tdraft.gross) * num(tdraft.commPct) / 100, tdraft.currency)));
+      else if (f === 'commPct' && !el.value) setv('commission', '');
+      const nt = document.getElementById('t_net'); if (nt) nt.innerHTML = saleNetHtml(tdraft);
     }
     const cur = tdraft.currency || 'USD';
-    const bl = document.getElementById('t_bal'); if (bl) bl.textContent = `Paid ${money(paidOf(tdraft), cur)} · balance ${money(Math.max(0, num(tdraft.amount) - paidOf(tdraft)), cur)}`;
+    const bl = document.getElementById('t_bal'); if (bl) bl.textContent = `Paid ${money(paidOf(tdraft), cur)} · balance ${money(Math.max(0, (isSaleCat(tdraft.category) ? saleCalc(tdraft).net : num(tdraft.amount)) - paidOf(tdraft)), cur)}`;
     const eq = document.getElementById('t_eq'); if (eq) eq.textContent = txnEquivText(tdraft);
     return;
   }

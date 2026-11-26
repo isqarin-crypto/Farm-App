@@ -1,5 +1,5 @@
 /* Farm Manager offline cache: network first, cached copy when offline. */
-const CACHE = 'farm-manager-v17';
+const CACHE = 'farm-manager-v18';
 const ASSETS = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
