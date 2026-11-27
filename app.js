@@ -1,7 +1,7 @@
 'use strict';
 /* Farm Manager — offline single-phone farm records. Data lives in this browser's localStorage. */
 
-const APP_VERSION = '19';
+const APP_VERSION = '20';
 const KEY = 'farmapp.v1';
 const app = document.getElementById('app');
 
@@ -200,8 +200,8 @@ function restore(r) {
   r.used = null;
 }
 function setDone(r, done) {
-  if (done && r.status !== 'done') { r.status = 'done'; r.doneOn = today(); if (r.endDate && today() >= r.date && today() < r.endDate) r.endDate = today() > r.date ? today() : ''; deduct(r); }
-  else if (!done && r.status === 'done') { restore(r); r.status = 'planned'; }
+  if (done && r.status !== 'done') { r.status = 'done'; r.doneOn = today(); if (r.endDate && today() >= r.date && today() < r.endDate) r.endDate = today() > r.date ? today() : ''; deduct(r); const n = spawnNext(r); if (n) setTimeout(() => toast(`Next one planned for ${fdy(n.date)}`), 50); }
+  else if (!done && r.status === 'done') { restore(r); r.status = 'planned'; unspawn(r); }
 }
 function recTitle(r) {
   const prods = (r.lines || []).map(l => stockById(l.stockId)?.name).filter(Boolean).join(' + ');
@@ -218,6 +218,8 @@ function recSub(r, showBlock = true) {
   if (r.type === 'irrigation') { if (num(r.minutes)) p.push(fmt(num(r.minutes)) + ' min'); if (num(r.m3)) p.push(fmt(num(r.m3)) + ' m³'); }
   if (r.type === 'scouting' && r.severity) p.push('Pressure: ' + r.severity);
   if ((r.photos || []).length) p.push(`📷 ${r.photos.length}`);
+  if (r.status === 'planned' && repDays(r)) p.push('🔁 ' + repText(r));
+  if (r.status === 'planned' && r.remindDays !== '' && r.remindDays != null) p.push('🔔 ' + REMIND[String(r.remindDays)].toLowerCase());
   if (r.type === 'fertigation' && (r.ec || r.ph)) p.push([r.ec ? 'EC ' + r.ec : '', r.ph ? 'pH ' + r.ph : ''].filter(Boolean).join(' '));
   if (r.type === 'spray' && r.status === 'done' && num(r.phiDays) > 0) p.push('PHI to ' + fd(addDays(recEnd(r), num(r.phiDays))));
   if (r.notes) p.push(r.notes.length > 60 ? r.notes.slice(0, 60) + '…' : r.notes);
@@ -323,6 +325,8 @@ function vToday() {
   if (odR.length) alerts.push(alertH('', 'coin', `Overdue from customers — ${owedTxt(odR)}`, [...new Set(odR.map(x => x.party || 'No name'))].join(', '), '#debts?tab=recv'));
   if (odP.length) alerts.push(alertH('', 'coin', `Overdue to suppliers — ${owedTxt(odP)}`, [...new Set(odP.map(x => x.party || 'No name'))].join(', '), '#debts?tab=pay'));
   if (!db.settings.lastBackup || diff(db.settings.lastBackup, t) > 14) alerts.push(alertH('', 'warn', 'Back up your records', db.settings.lastBackup ? `Last backup ${fdy(db.settings.lastBackup)}` : 'No backup yet. Export a file from Settings.', '#settings'));
+  alerts.unshift(...remindAlerts());
+  { const da = driveAlert(); if (da) alerts.unshift(da); }
   const lp = [...db.power].sort(byDateDesc)[0];
   return `
   <div class="between"><div class="col"><span class="eyebrow">${esc(fdl(t))}</span><h1>${esc(db.settings.farmName || 'Today')}</h1></div><a class="ib" href="#settings" aria-label="Settings">${ic('gear', 20)}</a></div>
@@ -576,6 +580,7 @@ function vRecord() {
     <div class="seg" role="group" aria-label="Status"><button type="button" class="${d.status === 'planned' ? 'on' : ''}" data-act="dstatus" data-v="planned" aria-pressed="${d.status === 'planned'}">Planned</button><button type="button" class="${d.status === 'done' ? 'on' : ''}" data-act="dstatus" data-v="done" aria-pressed="${d.status === 'done'}">Done</button></div>
     <div class="g2">${fld('date', 'Date (first day)', '', 'date')}${fld('endDate', 'Last day (if longer)', '', 'date')}</div>
     <div class="f"><label for="r_blockId">Block</label><select id="r_blockId" data-f="blockId">${blockOpts}</select></div>
+    ${d.status === 'planned' || repDays(d) || d.repeatOn ? repeatCard(d) : ''}
     ${d.endDate && d.endDate > d.date || (d.extLog || []).length ? `<div class="card" style="gap:6px"><span class="t">Work period${d.endDate > d.date ? `: ${fd(d.date)} – ${fd(d.endDate)} · ${diff(d.date, d.endDate) + 1} days` : ''}</span>${(d.extLog || []).map(x => `<span class="s">Extended on ${fd(x.on)}: ${fd(x.from)} → ${fd(x.to)}${x.why ? ' — ' + esc(x.why) : ''}</span>`).join('')}${d.doneOn ? `<span class="s">Marked done on ${fd(d.doneOn)}</span>` : ''}</div>` : ''}
     ${(d.type === 'spray' || d.type === 'scouting') && d.blockId ? (() => { const bi = (db.issues || []).filter(i => i.blockId === d.blockId && (isOpenIssue(i) || i.id === d.issueId)); return bi.length ? `<div class="f"><label for="r_issueId">Related plant-health problem</label><select id="r_issueId" data-f="issueId"><option value="">None</option>${bi.map(i => `<option value="${i.id}" ${i.id === d.issueId ? 'selected' : ''}>${esc(issueName(i))} · ${fd(i.date)}</option>`).join('')}</select></div>` : (d.type === 'scouting' ? `<a class="btn sm" href="#issueedit/new?block=${d.blockId}" style="align-self:flex-start">${ic('plus', 16, 2.2)}Report as plant-health problem</a>` : ''); })() : ''}
     ${specific}
@@ -691,7 +696,9 @@ function vSettings() {
     <button class="btn pri" data-act="export">Export backup file (with photos)</button>
     <button class="btn" data-act="exportlite">Export without photos (smaller file)</button>
     <span class="s" id="photoinfo"></span>
-    <label class="btn" for="importFile">Restore from backup file</label><input id="importFile" type="file" accept=".json,application/json" class="sr"></div>
+    <label class="btn" for="importFile">Restore from backup file</label><input id="importFile" type="file" accept=".json,application/json" class="sr">
+    <a class="btn" href="#drive">Google Drive backup${DRV().connected ? ` · ${DRV().lastAt ? 'last ' + fd(DRV().lastAt.slice(0, 10)) : 'connected'}` : ''}</a></div>
+  ${reminderCard()}
   ${installEvt ? `<div class="card"><span class="t">Install</span><span class="s">Add Farm Manager to your home screen so it opens like an app and works offline.</span><button class="btn pri" data-act="install">Install app</button></div>` : ''}
   <div class="card"><span class="t">Data</span>
     <span class="s">${db.blocks.length} blocks · ${db.records.length} records · ${db.stock.length} stock items · ${db.txns.length} transactions · ${(db.rates || []).length} rates · ${db.power.length} power logs · ${(db.issues || []).length} plant-health problems · app version ${APP_VERSION}</span>
@@ -1797,8 +1804,8 @@ function vAI() {
   ${a.msgs.length ? '' : `<div class="form">
     <div class="chips" role="group" aria-label="Type of question">${Object.entries(AI_KINDS).map(([k, l]) => `<button type="button" class="chip ${a.kind === k ? 'on' : ''}" data-act="aikind" data-v="${k}" aria-pressed="${a.kind === k}">${l}</button>`).join('')}</div>
     <div class="f"><label for="ai_block">Block</label><select id="ai_block" data-af="blockId">${blockOpts}</select><span class="hint">Only the records that bear on your question are attached.</span></div>
-    <div class="f"><span class="lbl">Photos (up to 4)</span>
-      <div class="row" style="gap:12px">${photos}${a.photos.length < 4 ? `<label for="ai_photo" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Add photo</label>` : ''}</div>
+    <div class="f"><span class="lbl">Photos (up to 20)</span>
+      <div class="row" style="gap:12px">${photos}${a.photos.length < 20 ? `<label for="ai_photo" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Add photo</label>` : ''}</div>
       <input id="ai_photo" type="file" accept="image/*" multiple class="sr">
       <span class="hint">Take a close-up of the affected leaf (top and underside), plus one of the whole plant.</span></div>
     <div class="f"><label for="ai_sym">${a.kind === 'question' ? 'Your question' : 'What do you see?'}</label><textarea id="ai_sym" data-af="symptoms" placeholder="${a.kind === 'diagnose' ? 'e.g. Yellow patches on older leaves, brown spots with rings, spreading over 5 days, about 20% of plants' : a.kind === 'nutrition' ? 'e.g. Plan fertigation for the next 2 weeks; leaves look pale' : 'e.g. When did I last spray abamectin on the tomatoes?'}">${esc(a.symptoms)}</textarea></div>
@@ -2145,7 +2152,7 @@ function vIssueEdit() {
     <div class="g2">${fld('spread', 'Plants affected (%)', 'inputmode="decimal" placeholder="e.g. 15"')}${fld('where', 'Where in the block', 'placeholder="e.g. rows 1–6, south end"')}</div>
     <div class="f"><label for="i_symptoms">What do you see?</label><textarea id="i_symptoms" data-if="symptoms" placeholder="Symptoms, which leaves or fruit, how fast it is spreading">${esc(d.symptoms)}</textarea></div>
     <div class="g2">${fld('cause', 'Suspected cause (optional)')}${fld('conditions', 'Weather / conditions', 'placeholder="e.g. hot, humid nights"')}</div>
-    ${photoPicker(d.photos, 'iph_cam', 'iph_gal', 8)}
+    ${photoPicker(d.photos, 'iph_cam', 'iph_gal', 20)}
     <div class="f"><span class="lbl">Status</span>${seg(['active', 'monitoring', 'resolved'], d.status, 'idstat', 'Status')}</div>
     ${d.status === 'resolved' ? `<div class="g2">${fld('resolvedOn', 'Resolved on', '', 'date')}${fld('outcome', 'Outcome (what worked)')}</div>` : ''}
     <button class="btn pri block" data-act="isave">Save problem</button>
@@ -2171,7 +2178,7 @@ function vFollowup() {
     <div class="f"><span class="lbl">Severity now</span>${seg(SEVS, d.severity, 'usev', 'Severity')}</div>
     <div class="f"><label for="u_spread">Plants affected now (%)</label><input id="u_spread" inputmode="decimal" data-uf="spread" value="${esc(d.spread)}"></div>
     <div class="f"><label for="u_note">What changed / what you did</label><textarea id="u_note" data-uf="note" placeholder="e.g. Spread to rows 7–10 after the wind; sprayed; lesions drying up">${esc(d.note)}</textarea></div>
-    ${photoPicker(d.photos, 'uph_cam', 'uph_gal', 8)}
+    ${photoPicker(d.photos, 'uph_cam', 'uph_gal', 20)}
     <div class="f"><span class="lbl">Status</span>${seg(['active', 'monitoring', 'resolved'], d.status, 'ustat', 'Status')}</div>
     <button class="btn pri block" data-act="usave">Save follow-up</button>
     ${d.id ? `<button class="btn danger block" data-act="udel">Delete follow-up</button>` : ''}
@@ -2379,6 +2386,7 @@ function render(resetScroll) {
       if (ldraftKey !== location.hash) { ldraft = initLDraft(parts[1]); ldraftKey = location.hash; }
       html = vListEdit(parts[1]); tab = 'today'; break;
     case 'settings': html = vSettings(); tab = 'today'; break;
+    case 'drive': html = vDrive(); tab = 'today'; if (DRV().clientId) loadGIS().catch(() => { }); break;
     case 'aiset': html = vAISet(); tab = 'today'; break;
     case 'aiprov': html = vAIProv(parts[1]); tab = 'today'; break;
     case 'aiusage': html = vAIUsage(); tab = 'today'; break;
@@ -2400,6 +2408,7 @@ function render(resetScroll) {
   if (resetScroll) window.scrollTo(0, 0);
   hydratePhotos();
   if (v === 'stockedit') stockFormInit();
+  if (v === 'drive') { const z = document.getElementById('dv_size'); if (z) PH.stats().then(x => { z.textContent = x.n ? `(${x.n} photos, about ${mb(x.bytes * 0.75)})` : '(no photos yet)'; }); }
   if (v === 'settings') {
     const pi = document.getElementById('photoinfo');
     if (pi) PH.stats().then(x => { pi.textContent = x.n ? `${x.n} photo${x.n > 1 ? 's' : ''} stored on this phone (about ${Math.max(1, Math.round(x.bytes / 1048576))} MB).` : 'No photos stored yet.'; });
@@ -2558,6 +2567,8 @@ const ACTS = {
     if (!(d.type === 'task' || d.type === 'other' || d.type === 'activity') && !d.blockId) return toast('Choose a block.');
     if ((d.type === 'task' || d.type === 'other') && !d.title.trim()) return toast('Describe the task.');
     const rec = JSON.parse(JSON.stringify(d));
+    const old_status = rec.id ? (db.records.find(r => r.id === rec.id) || {}).status : '';
+    if (rec.id) { const old0 = db.records.find(r => r.id === rec.id); if (old0 && old0.date !== rec.date) rec.notified = []; }
     if (rec.id) { const old = db.records.find(r => r.id === rec.id); ((old && old.photos) || []).filter(x => !(rec.photos || []).includes(x)).forEach(x => PH.del(x)); }
     if (!(rec.photos || []).length) delete rec.photos;
     rec.lines = (rec.lines || []).filter(l => l.stockId);
@@ -2579,6 +2590,9 @@ const ACTS = {
       db.records.push(rec);
     }
     if (rec.type === 'spray' && num(rec.tankL)) db.settings.tankL = rec.tankL;
+    const saved = db.records.find(r => r.id === rec.id);
+    if (saved) { saved.repeatEvery = repDays(saved) ? Math.round(num(saved.repeatEvery)) : ''; if (!saved.repeatEvery) saved.repeatUnit = ''; delete saved.repeatOn;
+      if (saved.status === 'done' && (!old_status || old_status !== 'done')) { const n = spawnNext(saved); if (n) setTimeout(() => toast(`Next one planned for ${fdy(n.date)}`), 400); } }
     save(); draftKey = null; toast(rec.status === 'done' ? 'Saved as done' + (rec.used && rec.used.length ? ' · stock updated' : '') : 'Saved as planned');
     go(rec.blockId ? '#block/' + rec.blockId : '#records');
   },
@@ -2661,12 +2675,12 @@ const ACTS = {
   export: () => doExport(true),
   exportlite: () => doExport(false),
   install: async () => { if (!installEvt) return; installEvt.prompt(); try { await installEvt.userChoice; } catch (e) { } installEvt = null; render(); },
-  loadsample: async () => { if (!await ask('Replace everything on this phone with sample data? Photos stored on this phone are removed too.')) return; await PH.clear(); const keepAI = { ai: db.settings.ai, aiMode: db.settings.aiMode }, keepU = db.aiUsage; db = sampleData(); Object.assign(db.settings, keepAI); db.aiUsage = keepU || []; normalize(db); save(); toast('Sample data loaded'); go('#today'); },
+  loadsample: async () => { if (!await ask('Replace everything on this phone with sample data? Photos stored on this phone are removed too.')) return; await PH.clear(); const keepAI = { ai: db.settings.ai, aiMode: db.settings.aiMode, drive: db.settings.drive }, keepU = db.aiUsage; db = sampleData(); Object.assign(db.settings, keepAI); db.aiUsage = keepU || []; normalize(db); save(); toast('Sample data loaded'); go('#today'); },
   clearall: async () => {
     if (!await ask(db.settings.sample ? 'Clear the sample data and start with an empty farm?' : 'Erase ALL records on this phone? Export a backup first if you need them.')) return;
     const name = db.settings.sample ? 'My farm' : db.settings.farmName;
     await PH.clear();
-    const keepAI = { ai: db.settings.ai, aiMode: db.settings.aiMode }, keepU = db.aiUsage;
+    const keepAI = { ai: db.settings.ai, aiMode: db.settings.aiMode, drive: db.settings.drive }, keepU = db.aiUsage;
     db = blank(); db.settings.farmName = name; Object.assign(db.settings, keepAI); db.aiUsage = keepU || []; save(); toast('Data cleared'); go('#settings'); render();
   }
 };
@@ -2675,9 +2689,7 @@ const toFile = (b64, name) => { const bin = atob(b64), u = new Uint8Array(bin.le
 async function doExport(withPhotos) {
   try {
     toast(withPhotos ? 'Preparing backup with photos…' : 'Preparing backup…');
-    const photos = withPhotos ? await PH.all() : [];
-    const out = Object.assign({}, db, { photos });
-    const blob = new Blob([photos.length ? JSON.stringify(out) : JSON.stringify(out, null, 2)], { type: 'application/json' });
+    const blob = new Blob([await backupJSON(withPhotos)], { type: 'application/json' }), photos = { length: withPhotos ? (await PH.all()).length : 0 };
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `farm-backup-${today()}${withPhotos ? '' : '-no-photos'}.json`;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 8000);
     db.settings.lastBackup = today(); save(); toast(photos.length ? `Backup downloaded with ${photos.length} photo${photos.length > 1 ? 's' : ''}` : 'Backup file downloaded'); render();
@@ -2777,7 +2789,7 @@ Object.assign(ACTS, {
     const i = issueById(el.dataset.id); if (!i) return;
     const a = freshAI(null); a.blockId = i.blockId; a.issueId = i.id; a.kind = 'diagnose';
     a.symptoms = [i.name ? 'Recorded as: ' + i.name + (i.kind ? ' (' + i.kind + ')' : '') : '', i.symptoms, i.where ? 'Where: ' + i.where : '', i.conditions ? 'Conditions: ' + i.conditions : '', i.cause ? 'I suspect: ' + i.cause : ''].filter(Boolean).join('\n');
-    const ids = [...updSorted(i).reverse().flatMap(u => u.photos || []), ...(i.photos || [])].slice(0, 4);
+    const ids = [...updSorted(i).reverse().flatMap(u => u.photos || []), ...(i.photos || [])].slice(0, 20);
     for (const id of ids) { const r = await PH.get(id); if (r) { const b64 = r.full.split(',')[1]; a.photos.push({ dataUrl: r.full, b64, file: toFile(b64, 'problem-photo.jpg') }); } }
     ai = a; aiKey = '#ai?issue=' + i.id; go('#ai?issue=' + i.id);
   },
@@ -2929,7 +2941,7 @@ function scoutPhotoStrip(d) {
   const x14 = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
   const ph = d.photos || [];
   const tiles = ph.map((id, k) => `<div style="position:relative;width:88px;height:88px;flex:none"><button type="button" class="ph" data-act="photo" data-pid="${esc(id)}" data-cap="Scouting photo" aria-label="Open photo ${k + 1}" style="width:88px;height:88px">${phImg(id, 'thumb', 'Scouting photo ' + (k + 1))}</button><button type="button" class="ib" data-act="scphdel" data-pid="${esc(id)}" aria-label="Remove photo ${k + 1}" style="position:absolute;top:-8px;right:-8px;width:32px;height:32px;border-radius:50%;background:#fff">${x14}</button></div>`).join('');
-  const add = ph.length < 4 ? `<label for="sc_cam" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0;flex:none">${ic('plus', 20, 2)}Camera</label><label for="sc_gal" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0;flex:none">${ic('plus', 20, 2)}Gallery</label>` : '';
+  const add = ph.length < 20 ? `<label for="sc_cam" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0;flex:none">${ic('plus', 20, 2)}Camera</label><label for="sc_gal" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0;flex:none">${ic('plus', 20, 2)}Gallery</label>` : '';
   return `<div class="row" style="gap:12px">${tiles}${add}</div><input id="sc_cam" type="file" accept="image/*" capture="environment" class="sr"><input id="sc_gal" type="file" accept="image/*" multiple class="sr">`;
 }
 function scoutAIBox(d) {
@@ -2939,7 +2951,7 @@ function scoutAIBox(d) {
     : `<div style="align-self:flex-end;max-width:85%;background:var(--accbg);color:var(--acc2);border-radius:12px;padding:8px 12px;font-size:14px;white-space:pre-wrap">${esc(m.display)}</div>`).join('') : '';
   return `<div class="card" style="gap:12px;border-color:var(--accline,var(--line))" id="scoutai">
     <span class="t">${ic('search', 18, 2)} Ask AI about what you found</span>
-    <div class="f"><span class="lbl">Photos (up to 4, kept with this record)</span>${scoutPhotoStrip(d)}<span class="hint">Close-up of the affected leaf, top and underside, and one of the whole plant.</span></div>
+    <div class="f"><span class="lbl">Photos (up to 20, kept with this record)</span>${scoutPhotoStrip(d)}<span class="hint">Close-up of the affected leaf, top and underside, and one of the whole plant.</span></div>
     ${convo ? `<div class="col" style="gap:10px">${convo}</div>` : ''}
     ${S.error ? alertH('bad', 'warn', S.error, '') : ''}
     ${S.busy ? `<div class="empty">Waiting for the answer…</div>` : ''}
@@ -2953,9 +2965,13 @@ function scoutAIBox(d) {
       <p class="hint" style="margin:0">AI advice can be wrong and is not a record of work done. Confirm in the field and follow the product label.</p>` : ''}
   </div>`;
 }
+function shrinkData(src, max) {
+  return new Promise(res => { const im = new Image(); im.onload = () => { const k = Math.min(1, max / Math.max(im.width, im.height)), c = document.createElement('canvas'); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k); c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); const u = k < 1 ? c.toDataURL('image/jpeg', 0.8) : src; res({ b64: u.split(',')[1], w: c.width, h: c.height }); }; im.onerror = () => res({ b64: src.split(',')[1], w: 1280, h: 960 }); im.src = src; });
+}
 async function scoutImages(d) {
   const out = [];
-  for (const id of d.photos || []) { const r = await PH.get(id); if (r) { const b64 = r.full.split(',')[1]; out.push({ b64, dataUrl: r.full, file: toFile(b64, 'scouting.jpg') }); } }
+  const ids = d.photos || [], small = ids.length > 6;
+  for (const id of ids) { const r = await PH.get(id); if (!r) continue; const x = await shrinkData(r.full, small ? 1000 : 1280); out.push({ b64: x.b64, w: x.w, h: x.h, dataUrl: r.full, file: toFile(x.b64, 'scouting.jpg') }); }
   return out;
 }
 function scoutSymptoms(d, q) {
@@ -3021,9 +3037,263 @@ document.addEventListener('change', e => {
   const el = e.target;
   if ((el.id === 'sc_cam' || el.id === 'sc_gal') && draft && el.files && el.files.length) {
     draft.photos = draft.photos || [];
-    addPhotos([...el.files], draft.photos, scoutAI().fresh, 4).then(() => { const S = scoutAI(); if (S.a) S.a = null, toast('Photos changed: the next question starts a new analysis.'); render(); });
+    addPhotos([...el.files], draft.photos, scoutAI().fresh, 20).then(() => { const S = scoutAI(); if (S.a) S.a = null, toast('Photos changed: the next question starts a new analysis.'); render(); });
   }
 });
+
+/* ---------- Google Drive backup (Google sign-in in the browser, drive.file scope: the app sees only files it created) ---------- */
+const GSCOPE = 'https://www.googleapis.com/auth/drive.file', GAPI = 'https://www.googleapis.com/drive/v3', GUP = 'https://www.googleapis.com/upload/drive/v3';
+const drv = { token: '', exp: 0, busy: false, gis: null, files: null, msg: '' };
+const DRV = () => { const s = db.settings; if (!s.drive) s.drive = { clientId: '', auto: true, every: 7, photos: true, keep: 8, connected: false, folderId: '', lastAt: '', lastName: '', lastSize: 0, lastPhotos: true, lastError: '' }; return s.drive; };
+function loadGIS() {
+  if (window.google && google.accounts && google.accounts.oauth2) return Promise.resolve();
+  if (drv.gis) return drv.gis;
+  drv.gis = new Promise((res, rej) => {
+    const sc = document.createElement('script'); sc.src = 'https://accounts.google.com/gsi/client'; sc.async = true;
+    sc.onload = () => res(); sc.onerror = () => { drv.gis = null; rej(new Error('Could not load Google sign-in. Check your internet connection.')); };
+    document.head.appendChild(sc);
+  });
+  return drv.gis;
+}
+const tokenOK = () => drv.token && Date.now() < drv.exp - 60000;
+function getToken(interactive) {
+  const D = DRV();
+  if (tokenOK()) return Promise.resolve(drv.token);
+  if (!interactive) return Promise.resolve('');
+  if (!(window.google && google.accounts && google.accounts.oauth2)) { loadGIS().catch(() => { }); return Promise.reject(new Error('Google sign-in is still loading. Wait a moment and tap again.')); }
+  return new Promise((res, rej) => {
+    const c = google.accounts.oauth2.initTokenClient({
+      client_id: D.clientId, scope: GSCOPE,
+      callback: r => {
+        if (r.error) return rej(new Error(r.error === 'access_denied' ? 'Access to Google Drive was not allowed.' : 'Google sign-in failed: ' + (r.error_description || r.error)));
+        if (google.accounts.oauth2.hasGrantedAllScopes && !google.accounts.oauth2.hasGrantedAllScopes(r, GSCOPE)) return rej(new Error('Tick the Google Drive box on the Google screen so the app can save backups.'));
+        drv.token = r.access_token; drv.exp = Date.now() + (num(r.expires_in) || 3600) * 1000; D.connected = true; save(); res(drv.token);
+      },
+      error_callback: e => rej(new Error(e && e.type === 'popup_failed_to_open' ? 'The Google window was blocked. Allow pop-ups for this site and tap again.' : e && e.type === 'popup_closed' ? 'The Google window was closed before finishing.' : 'Google sign-in failed.'))
+    });
+    c.requestAccessToken({ prompt: D.connected ? '' : 'consent' });
+  });
+}
+async function gfetch(url, opt = {}) {
+  if (navigator.onLine === false) throw new Error('No internet connection.');
+  const res = await fetch(url, Object.assign({}, opt, { headers: Object.assign({ authorization: 'Bearer ' + drv.token }, opt.headers || {}) }));
+  if (res.status === 401) { drv.token = ''; const e = new Error('Your Google sign-in has expired. Tap Back up now to sign in again.'); e.status = 401; throw e; }
+  if (!res.ok) { let m = ''; try { const j = await res.json(); m = (j.error && j.error.message) || ''; } catch (e) { } const e = new Error(res.status === 403 && /quota|storage/i.test(m) ? 'Your Google Drive is full.' : `Google Drive error (${res.status})${m ? ': ' + m : ''}`); e.status = res.status; throw e; }
+  return res;
+}
+const gjson = async (u, o) => (await gfetch(u, o)).json();
+async function ensureFolder() {
+  const D = DRV();
+  if (D.folderId) { try { const f = await gjson(`${GAPI}/files/${encodeURIComponent(D.folderId)}?fields=id,trashed`); if (!f.trashed) return D.folderId; } catch (e) { if (e.status !== 404) throw e; } }
+  const f = await gjson(`${GAPI}/files?fields=id`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Farm Manager backups', mimeType: 'application/vnd.google-apps.folder' }) });
+  D.folderId = f.id; save(); return f.id;
+}
+async function listDrive(folder) {
+  const q = encodeURIComponent(`'${folder}' in parents and trashed=false`);
+  const j = await gjson(`${GAPI}/files?q=${q}&orderBy=createdTime desc&pageSize=100&fields=files(id,name,size,createdTime)`);
+  return (j.files || []).filter(f => /^farm-backup-/.test(f.name));
+}
+async function backupJSON(withPhotos) {
+  const photos = withPhotos ? await PH.all() : [];
+  return JSON.stringify(Object.assign({}, db, { photos }));
+}
+const mb = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+async function driveBackup(interactive) {
+  const D = DRV(); if (drv.busy || !D.clientId) return false;
+  try { if (!await getToken(interactive)) return false; } catch (e) { D.lastError = e.message; save(); toast(e.message); rerenderDrive(); return false; }
+  drv.busy = true; drv.msg = 'Preparing the backup…'; rerenderDrive();
+  try {
+    const withPhotos = D.photos !== false, blob = new Blob([await backupJSON(withPhotos)], { type: 'application/json' });
+    const folder = await ensureFolder(), stamp = new Date(), hh = String(stamp.getHours()).padStart(2, '0') + String(stamp.getMinutes()).padStart(2, '0');
+    const name = `farm-backup-${today()}-${hh}${withPhotos ? '' : '-no-photos'}.json`;
+    drv.msg = `Uploading ${mb(blob.size)}…`; rerenderDrive();
+    const init = await gfetch(`${GUP}/files?uploadType=resumable&fields=id,name,size`, { method: 'POST', headers: { 'content-type': 'application/json; charset=UTF-8', 'x-upload-content-type': 'application/json', 'x-upload-content-length': String(blob.size) }, body: JSON.stringify({ name, parents: [folder], mimeType: 'application/json', description: 'Farm Manager backup' }) });
+    const loc = init.headers.get('location'); if (!loc) throw new Error('Google Drive did not start the upload. Try again.');
+    const put = await fetch(loc, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: blob });
+    if (!put.ok) throw new Error(`The upload failed (${put.status}). Try again.`);
+    Object.assign(D, { lastAt: stamp.toISOString(), lastName: name, lastSize: blob.size, lastPhotos: withPhotos, lastError: '' }); db.settings.lastBackup = today(); save();
+    try { const keep = Math.max(1, num(D.keep) || 8); for (const f of (await listDrive(folder)).slice(keep)) await gfetch(`${GAPI}/files/${f.id}`, { method: 'DELETE' }); } catch (e) { /* old copies stay; harmless */ }
+    drv.files = null; toast(`Backed up to Google Drive (${mb(blob.size)}${withPhotos ? ', with photos' : ', no photos'})`); return true;
+  } catch (e) { D.lastError = e.message; save(); toast(e.message); return false; }
+  finally { drv.busy = false; drv.msg = ''; rerenderDrive(); }
+}
+function rerenderDrive() { const v = route().parts[0]; if (['drive', 'settings', 'today'].includes(v)) render(); }
+const driveDue = () => { const D = DRV(); return !!(D.clientId && D.connected && D.auto !== false && (!D.lastAt || Date.now() - Date.parse(D.lastAt) >= (num(D.every) || 7) * 864e5)); };
+function driveAuto() { if (driveDue() && tokenOK() && navigator.onLine !== false) driveBackup(false); }
+function driveAlert() {
+  const D = DRV(); if (!driveDue()) return '';
+  return `<div class="alert">${ic('clock', 20, 2)}<span class="main"><span class="t">Google Drive backup is due</span><span class="s">${D.lastAt ? 'Last one ' + fdy(D.lastAt.slice(0, 10)) : 'No Drive backup yet'} · ${D.photos !== false ? 'with photos' : 'without photos'}</span></span><button class="btn sm pri" data-act="drvnow" ${drv.busy ? 'disabled' : ''}>${drv.busy ? 'Backing up…' : 'Back up now'}</button></div>`;
+}
+function vDrive() {
+  const D = DRV(), sel = (k, arr, lab) => `<select id="dv_${k}" data-dv="${k}">${arr.map(v => `<option value="${v}" ${String(D[k]) === String(v) ? 'selected' : ''}>${lab(v)}</option>`).join('')}</select>`;
+  const setup = `<div class="card" style="gap:10px"><span class="t">One-time setup (about 10 minutes, on a computer is easiest)</span>
+    <span class="s">Google requires every app that saves to Drive to have its own sign-in ID. Because this app runs from your own GitHub site, you create that ID once in your Google account. It is free.</span>
+    <ol style="margin:0;padding-left:20px;font-size:14px;line-height:1.55">
+      <li>Open <strong>console.cloud.google.com</strong> and sign in with the Google account whose Drive you want to use. Create a project, for example "Farm Manager".</li>
+      <li>Go to <strong>APIs &amp; Services → Library</strong>, search for <strong>Google Drive API</strong> and tap <strong>Enable</strong>.</li>
+      <li>Open <strong>Google Auth Platform</strong> (the OAuth consent screen). Choose <strong>External</strong>, give the app a name and your email. Under <strong>Audience</strong>, add your own Gmail address as a <strong>test user</strong>.</li>
+      <li>Go to <strong>Clients → Create client</strong>, type <strong>Web application</strong>. Under <strong>Authorized JavaScript origins</strong> add exactly:<br><code style="user-select:all;word-break:break-all">${esc(location.origin)}</code></li>
+      <li>Create, copy the <strong>Client ID</strong> (ends with .apps.googleusercontent.com) and paste it below.</li></ol>
+    <div class="f"><label for="dv_client">Client ID</label><input id="dv_client" value="${esc(D.clientId)}" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="1234…apps.googleusercontent.com"></div>
+    <button class="btn pri" data-act="drvsaveid">Save Client ID</button>
+    <span class="hint">The first time you connect, Google may warn that the app is unverified. That is expected for an app only you use: tap Continue. The app asks only for access to files it creates itself, not the rest of your Drive.</span></div>`;
+  if (!D.clientId) return `${back('#settings', 'Settings')}<h1>Google Drive backup</h1>${setup}`;
+  const last = D.lastAt ? new Date(D.lastAt) : null;
+  return `${back('#settings', 'Settings')}<h1>Google Drive backup</h1>
+  <div class="card" style="gap:8px">
+    <div class="between"><span class="t">${D.connected ? 'Connected to Google Drive' : 'Not connected yet'}</span><span class="badge ${D.connected ? 'b-ok' : 'b-warn'}">${D.connected ? (tokenOK() ? 'Signed in' : 'Signed out for now') : 'Setup needed'}</span></div>
+    <span class="s">${last ? `Last backup: <strong>${fdy(D.lastAt.slice(0, 10))} ${last.toTimeString().slice(0, 5)}</strong> · ${mb(D.lastSize)} · ${D.lastPhotos ? 'with photos' : 'no photos'}` : 'No backup on Drive yet.'}${D.auto !== false && D.connected ? ` · next due ${fdy(addDays((D.lastAt || new Date().toISOString()).slice(0, 10), D.lastAt ? num(D.every) || 7 : 0))}` : ''}</span>
+    ${D.lastError ? `<span class="s neg">Last attempt failed: ${esc(D.lastError)}</span>` : ''}
+    ${drv.busy ? `<div class="empty">${esc(drv.msg || 'Working…')}</div>` : `<button class="btn pri" data-act="drvnow">${D.connected ? 'Back up now' : 'Connect and back up now'}</button>`}
+    <span class="hint">Backups go into a folder called <strong>Farm Manager backups</strong> in your Drive.</span></div>
+  <div class="card" style="gap:10px"><span class="t">Schedule</span>
+    <label class="row" style="gap:10px;min-height:44px;font-size:14px"><input type="checkbox" class="check" data-dv="auto" ${D.auto !== false ? 'checked' : ''}>Back up automatically</label>
+    <div class="g2"><div class="f"><label for="dv_every">How often</label>${sel('every', [1, 3, 7, 14, 30], v => v === 1 ? 'Every day' : v === 7 ? 'Every week' : `Every ${v} days`)}</div><div class="f"><label for="dv_keep">Keep on Drive</label>${sel('keep', [4, 8, 12, 26, 52], v => `Last ${v} backups`)}</div></div>
+    <label class="row" style="gap:10px;min-height:44px;font-size:14px"><input type="checkbox" class="check" data-dv="photos" ${D.photos !== false ? 'checked' : ''}>Include photos <span class="s" id="dv_size"></span></label>
+    <span class="hint">How "automatic" works on a phone: when you open the app and a backup is due, it uploads by itself if you signed in to Google within the last hour. Otherwise Today shows <strong>Back up now</strong>: one tap, and Google signs you straight in after the first time. Phone browsers do not let web apps sign in to Google or run while closed without a tap.</span></div>
+  <div class="card" style="gap:10px"><span class="t">Restore from Drive</span>
+    ${drv.files ? (drv.files.length ? `<div class="list">${drv.files.map(f => `<div class="item"><span class="main"><span class="t mono" style="font-size:12px;word-break:break-all">${esc(f.name)}</span><span class="s">${fdy(f.createdTime.slice(0, 10))} ${new Date(f.createdTime).toTimeString().slice(0, 5)} · ${mb(num(f.size))}</span></span><button class="btn sm" data-act="drvrestore" data-id="${esc(f.id)}">Restore</button></div>`).join('')}</div>` : '<span class="s">No backups found in the Farm Manager backups folder.</span>') : `<button class="btn" data-act="drvlist">Show backups on Drive</button>`}
+    <span class="hint">Restoring replaces what is on this phone with the chosen backup. Your AI keys and Drive settings stay as they are.</span></div>
+  <details><summary class="s" style="cursor:pointer;min-height:44px;display:flex;align-items:center">Change Client ID or disconnect</summary><div class="col" style="gap:10px">${setup}<button class="btn danger" data-act="drvdisconnect">Disconnect Google Drive</button></div></details>`;
+}
+async function restoreBackup(o) {
+  if (!o || !Array.isArray(o.blocks) || !Array.isArray(o.records) || !Array.isArray(o.stock)) throw new Error('shape');
+  if (!await ask(`Restore this backup (${o.blocks.length} blocks, ${o.records.length} records${(o.issues || []).length ? ', ' + o.issues.length + ' plant-health problems' : ''}${Array.isArray(o.photos) && o.photos.length ? ', ' + o.photos.length + ' photos' : ''})? It replaces what is on this phone now.`)) return false;
+  const photos = Array.isArray(o.photos) ? o.photos : []; delete o.photos;
+  if (photos.length || !(o.issues || []).length) { await PH.clear(); for (const p of photos) if (p && p.id) { try { await PH.put(p); } catch (e) { } } }
+  const curAI = db.settings.ai, curMode = db.settings.aiMode, curU = db.aiUsage, curDrive = db.settings.drive;
+  db = Object.assign(blank(), o); db.settings = Object.assign(blank().settings, o.settings || {});
+  if (curAI && curAI.providers.length) { db.settings.ai = curAI; db.settings.aiMode = curMode; db.aiUsage = curU; }
+  if (curDrive && curDrive.clientId) db.settings.drive = curDrive;
+  normalize(db); save(); toast('Backup restored' + (photos.length ? ` with ${photos.length} photo${photos.length > 1 ? 's' : ''}` : '')); go('#today'); render();
+  return true;
+}
+Object.assign(ACTS, {
+  drvsaveid: () => {
+    const v = val('dv_client'), D = DRV();
+    if (!/^[\w-]+\.apps\.googleusercontent\.com$/.test(v)) return toast('That does not look like a Client ID. It ends with .apps.googleusercontent.com');
+    if (v !== D.clientId) { D.clientId = v; D.connected = false; drv.token = ''; }
+    save(); loadGIS().catch(() => { }); toast('Client ID saved. Now tap Connect and back up now.'); render();
+  },
+  drvnow: () => driveBackup(true),
+  drvlist: async () => {
+    try { await getToken(true); drv.files = await listDrive(await ensureFolder()); render(); } catch (e) { toast(e.message); }
+  },
+  drvrestore: async el => {
+    try {
+      await getToken(true); toast('Downloading the backup…');
+      const o = await (await gfetch(`${GAPI}/files/${encodeURIComponent(el.dataset.id)}?alt=media`)).json();
+      await restoreBackup(o);
+    } catch (e) { toast(e.message === 'shape' ? 'That file is not a Farm Manager backup.' : e.message); }
+  },
+  drvdisconnect: async () => {
+    if (!await ask('Disconnect Google Drive? Backups already on Drive stay there.', 'Disconnect')) return;
+    try { if (drv.token && window.google && google.accounts) google.accounts.oauth2.revoke(drv.token, () => { }); } catch (e) { }
+    const D = DRV(); drv.token = ''; D.connected = false; save(); render();
+  }
+});
+document.addEventListener('change', e => {
+  const el = e.target; if (!el.dataset || el.dataset.dv === undefined) return;
+  const D = DRV(), k = el.dataset.dv; D[k] = el.type === 'checkbox' ? el.checked : num(el.value); save(); render();
+});
+
+/* ---------- repeating tasks & reminders ---------- */
+const repDays = r => num(r.repeatEvery) > 0 ? Math.round(num(r.repeatEvery)) * (r.repeatUnit === 'weeks' ? 7 : 1) : 0;
+const repText = r => { const n = Math.round(num(r.repeatEvery)); return repDays(r) ? (r.repeatUnit === 'weeks' ? (n === 1 ? 'every week' : `every ${n} weeks`) : (n === 1 ? 'every day' : `every ${n} days`)) : ''; };
+const REMIND = { '': 'No reminder', '0': 'On the day', '1': '1 day before', '2': '2 days before', '3': '3 days before' };
+function nextDate(r) { const base = r.doneOn && r.doneOn > r.date ? r.doneOn : r.date; return addDays(base, repDays(r)); }
+function spawnNext(r) {
+  if (!repDays(r) || (r.nextId && db.records.some(x => x.id === r.nextId))) return null;
+  const c = JSON.parse(JSON.stringify(r)), nd = nextDate(r), span = r.endDate && r.endDate > r.date ? diff(r.date, r.endDate) : 0;
+  Object.assign(c, { id: uid(), created: Date.now(), status: 'planned', date: nd, endDate: span ? addDays(nd, span) : '', doneOn: '', used: null, extLog: [], notified: [], nextId: '', prevId: r.id, notes: '', issueId: '' });
+  delete c.photos;
+  db.records.push(c); r.nextId = c.id; return c;
+}
+function unspawn(r) {
+  const i = r.nextId ? db.records.findIndex(x => x.id === r.nextId) : -1;
+  if (i >= 0 && db.records[i].status === 'planned') { db.records.splice(i, 1); r.nextId = ''; }
+}
+function repeatCard(d) {
+  const on = !!(d.repeatOn || repDays(d)), nf = (f, extra) => `<input id="r_${f}" data-f="${f}" value="${esc(d[f] == null ? '' : d[f])}" ${extra}>`;
+  const perm = 'Notification' in window ? Notification.permission : 'unsupported';
+  return `<div class="card" style="gap:10px"><span class="t">Repeat &amp; reminder</span>
+    <div class="seg" role="group" aria-label="Repeat"><button type="button" class="${!on ? 'on' : ''}" data-act="drep" data-v="0" aria-pressed="${!on}">Does not repeat</button><button type="button" class="${on ? 'on' : ''}" data-act="drep" data-v="1" aria-pressed="${on}">Repeats</button></div>
+    ${on ? `<div class="g2"><div class="f"><label for="r_repeatEvery">Every</label>${nf('repeatEvery', 'inputmode="numeric" placeholder="e.g. 7"')}</div><div class="f"><label for="r_repeatUnit">Unit</label><select id="r_repeatUnit" data-f="repeatUnit"><option value="days" ${d.repeatUnit !== 'weeks' ? 'selected' : ''}>days</option><option value="weeks" ${d.repeatUnit === 'weeks' ? 'selected' : ''}>weeks</option></select></div></div>
+      <span class="hint" id="r_next">${repNextText(d)}</span>` : ''}
+    <div class="f"><label for="r_remindDays">Reminder</label><select id="r_remindDays" data-f="remindDays">${Object.entries(REMIND).map(([k, l]) => `<option value="${k}" ${String(d.remindDays == null ? '' : d.remindDays) === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <span class="hint">${perm === 'granted' ? 'Phone notifications are on.' : perm === 'denied' ? 'Notifications are blocked for this app in the phone settings, so reminders show only on Today.' : perm === 'unsupported' ? 'This browser cannot show notifications; reminders show on Today.' : 'Reminders show on Today. Allow notifications to also get them on the phone.'}</span>
+      ${perm === 'default' ? `<button type="button" class="btn sm" data-act="notifallow" style="align-self:flex-start">Allow notifications</button>` : ''}</div>
+    ${d.date ? `<a class="btn sm" id="r_gcal" href="${esc(gcalLink(d))}" target="_blank" rel="noopener" style="align-self:flex-start">Add to Google Calendar (for a phone alarm)</a>` : ''}</div>`;
+}
+function repNextText(d) { return repDays(d) ? `When you tick it done, the next one is planned automatically for ${fdy(nextDate(Object.assign({}, d, { doneOn: '' })))} (${repText(d)}).` : 'Enter how often it repeats.'; }
+function gcalLink(r) {
+  const d8 = s => s.replace(/-/g, ''), end = addDays(recEnd(r), 1), b = blockById(r.blockId);
+  const p = new URLSearchParams({ action: 'TEMPLATE', text: recTitle(r) + (b ? ' — ' + b.name : ''), dates: `${d8(r.date)}/${d8(end)}`, details: 'From Farm Manager. Set the alert to 1 or 2 days before if you want an early reminder.' });
+  if (repDays(r)) p.set('recur', `RRULE:FREQ=${r.repeatUnit === 'weeks' ? 'WEEKLY' : 'DAILY'};INTERVAL=${Math.round(num(r.repeatEvery))}`);
+  return 'https://calendar.google.com/calendar/render?' + p.toString();
+}
+function remState(r) {
+  if (r.status !== 'planned' || r.remindDays === '' || r.remindDays == null) return null;
+  const t = today(), rd = num(r.remindDays), start = addDays(r.date, -rd);
+  if (t < start) return null;
+  const dd = diff(t, r.date), when = t > recEnd(r) ? `overdue since ${fd(recEnd(r))}` : dd <= 0 ? 'due today' : dd === 1 ? 'due tomorrow' : `due in ${dd} days`;
+  return { key: (t >= r.date ? 'day:' : 'pre:') + r.date, when, overdue: t > recEnd(r) };
+}
+function remindAlerts() {
+  return db.records.map(r => ({ r, s: remState(r) })).filter(x => x.s && !x.s.overdue).sort((a, b) => a.r.date.localeCompare(b.r.date))
+    .map(({ r, s }) => alertH('', 'clock', `Reminder: ${recTitle(r)} — ${s.when}`, [(blockById(r.blockId) || {}).name, repText(r) ? 'repeats ' + repText(r) : ''].filter(Boolean).join(' · '), '#record/' + r.id));
+}
+async function notify(title, body, tag, url) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+  const opt = { body, tag, icon: 'icon-192.png', badge: 'icon-192.png', data: { url } };
+  try { const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration(); if (reg) { await reg.showNotification(title, opt); return true; } } catch (e) { }
+  try { new Notification(title, opt); return true; } catch (e) { return false; }
+}
+/* the service worker may already have shown some reminders while the app was closed */
+const SWDB = { open() { return new Promise(res => { try { const q = indexedDB.open('farmapp.sw', 1); q.onupgradeneeded = () => q.result.createObjectStore('kv'); q.onsuccess = () => res(q.result); q.onerror = () => res(null); } catch (e) { res(null); } }); },
+  async get(k) { const d = await this.open(); if (!d) return null; return new Promise(res => { const r = d.transaction('kv').objectStore('kv').get(k); r.onsuccess = () => res(r.result); r.onerror = () => res(null); }); },
+  async set(k, v) { const d = await this.open(); if (!d) return; return new Promise(res => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = t.onerror = () => res(); }); } };
+async function checkReminders() {
+  try {
+    const sent = new Set((await SWDB.get('sent')) || []); let ch = false;
+    for (const r of db.records) {
+      const s = remState(r); if (!s || s.overdue) continue;
+      r.notified = r.notified || [];
+      if (sent.has(r.id + '|' + s.key) && !r.notified.includes(s.key)) { r.notified.push(s.key); ch = true; continue; }
+      if (r.notified.includes(s.key)) continue;
+      if (await notify(`${recTitle(r)} — ${s.when}`, [(blockById(r.blockId) || {}).name, db.settings.farmName].filter(Boolean).join(' · '), 'rem-' + r.id, '#record/' + r.id)) { r.notified.push(s.key); ch = true; }
+    }
+    if (ch) save();
+    const up = db.records.filter(r => r.status === 'planned' && r.remindDays !== '' && r.remindDays != null && r.date <= addDays(today(), 60)).map(r => ({ id: r.id, title: recTitle(r), block: (blockById(r.blockId) || {}).name || '', date: r.date, end: recEnd(r), rd: num(r.remindDays), notified: r.notified || [] }));
+    await SWDB.set('reminders', up);
+  } catch (e) { /* reminders are best effort */ }
+}
+async function bgSync() {
+  try {
+    const reg = await navigator.serviceWorker.ready; if (!('periodicSync' in reg)) return 'unsupported';
+    const st = await navigator.permissions.query({ name: 'periodic-background-sync' });
+    if (st.state !== 'granted') return 'not allowed';
+    await reg.periodicSync.register('farm-reminders', { minInterval: 12 * 3600 * 1000 }); return 'on';
+  } catch (e) { return 'unsupported'; }
+}
+Object.assign(ACTS, {
+  drep: el => { const on = el.dataset.v === '1'; draft.repeatOn = on; if (on && !num(draft.repeatEvery)) { draft.repeatEvery = '7'; draft.repeatUnit = 'days'; } if (!on) { draft.repeatEvery = ''; } render(); },
+  notifallow: async () => {
+    if (!('Notification' in window)) return toast('This browser cannot show notifications.');
+    const p = await Notification.requestPermission();
+    if (p === 'granted') { bgSync(); notify('Reminders are on', 'Farm Manager will remind you about planned tasks.', 'rem-test', '#today'); }
+    else toast('Notifications were not allowed. Reminders still show on Today.');
+    render();
+  },
+  notiftest: () => notify('Test reminder', 'This is how Farm Manager reminders look.', 'rem-test', '#today').then(ok => { if (!ok) toast('Allow notifications first.'); })
+});
+function reminderCard() {
+  const perm = 'Notification' in window ? Notification.permission : 'unsupported';
+  return `<div class="card" style="gap:8px"><span class="t">Reminders &amp; notifications</span>
+    <span class="s">${perm === 'granted' ? 'Phone notifications are on.' : perm === 'denied' ? 'Notifications are blocked. Turn them on for this app in the phone settings (Apps → Farm Manager or Chrome → Notifications).' : perm === 'unsupported' ? 'This browser cannot show notifications.' : 'Notifications are off.'}</span>
+    ${perm === 'default' ? `<button class="btn pri" data-act="notifallow">Allow notifications</button>` : perm === 'granted' ? `<button class="btn" data-act="notiftest">Send a test notification</button>` : ''}
+    <span class="hint">Set a reminder on any planned task (On the day, or 1–3 days before). You are notified when the app is open or in the background. When it is fully closed, Android may still check about once or twice a day if the app is installed, but the phone decides when, so it is not exact. For an alarm at an exact time, use <strong>Add to Google Calendar</strong> on the task.</span></div>`;
+}
 
 /* ---------- AI actions ---------- */
 function tinyTestImage() {
@@ -3176,25 +3446,17 @@ document.addEventListener('change', e => {
   } else if (el.id === 'set_model') { db.settings.aiModel = el.value; save();
   } else if (el.dataset.rc !== undefined && rdraft) { rdraft[el.dataset.rc] = el.checked; render();
   } else if ((el.id === 'iph_cam' || el.id === 'iph_gal') && idraft && el.files && el.files.length) {
-    addPhotos([...el.files], idraft.photos, idraft.newPhotos, 8).then(() => render());
+    addPhotos([...el.files], idraft.photos, idraft.newPhotos, 20).then(() => render());
   } else if ((el.id === 'uph_cam' || el.id === 'uph_gal') && udraft && el.files && el.files.length) {
-    addPhotos([...el.files], udraft.photos, udraft.newPhotos, 8).then(() => render());
+    addPhotos([...el.files], udraft.photos, udraft.newPhotos, 20).then(() => render());
   } else if (el.id === 'ai_photo' && el.files && el.files.length && ai) {
-    const fl = [...el.files].slice(0, 4 - ai.photos.length);
+    const fl = [...el.files].slice(0, 20 - ai.photos.length);
     Promise.all(fl.map(f => loadPhoto(f).catch(() => null))).then(ps => { const ok = ps.filter(Boolean); ai.photos.push(...ok); if (ok.length < fl.length) toast('One photo could not be read.'); render(); });
   } else if (el.id === 'importFile' && el.files && el.files[0]) {
     const fr = new FileReader();
     fr.onload = async () => {
       try {
-        const o = JSON.parse(fr.result);
-        if (!o || !Array.isArray(o.blocks) || !Array.isArray(o.records) || !Array.isArray(o.stock)) throw new Error('shape');
-        if (!await ask(`Restore this backup (${o.blocks.length} blocks, ${o.records.length} records${(o.issues || []).length ? ', ' + o.issues.length + ' plant-health problems' : ''}${Array.isArray(o.photos) && o.photos.length ? ', ' + o.photos.length + ' photos' : ''})? It replaces what is on this phone now.`)) return;
-        const photos = Array.isArray(o.photos) ? o.photos : []; delete o.photos;
-        await PH.clear(); for (const p of photos) if (p && p.id) { try { await PH.put(p); } catch (e) { } }
-        const curAI = db.settings.ai, curMode = db.settings.aiMode, curU = db.aiUsage;
-        db = Object.assign(blank(), o); db.settings = Object.assign(blank().settings, o.settings || {});
-        if (curAI && curAI.providers.length) { db.settings.ai = curAI; db.settings.aiMode = curMode; db.aiUsage = curU; }
-        normalize(db); save(); toast('Backup restored' + (photos.length ? ` with ${photos.length} photo${photos.length > 1 ? 's' : ''}` : '')); go('#today'); render();
+        await restoreBackup(JSON.parse(fr.result));
       } catch (err) { toast('That file is not a Farm Manager backup.'); }
     };
     fr.readAsText(el.files[0]);
@@ -3232,6 +3494,8 @@ document.addEventListener('input', e => {
   if (el.id === 'stockq') { ui.q = el.value; document.getElementById('stocklist').innerHTML = stockListHtml(); return; }
   if (el.dataset.f !== undefined && draft) {
     draft[el.dataset.f] = el.value;
+    if (['repeatEvery', 'repeatUnit', 'date'].includes(el.dataset.f)) { const nx = document.getElementById('r_next'); if (nx) nx.textContent = repNextText(draft); }
+    { const gl = document.getElementById('r_gcal'); if (gl && draft.date) gl.href = gcalLink(draft); }
     if (el.dataset.f === 'blockId') { const li = draft.issueId && issueById(draft.issueId); if (li && li.blockId !== el.value) draft.issueId = ''; render(); return; }
     updateLive(); return;
   }
@@ -3256,3 +3520,6 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
 }
 
 render(true);
+setTimeout(() => { if (DRV().clientId && navigator.onLine !== false) loadGIS().catch(() => { }); driveAuto(); checkReminders(); if ('Notification' in window && Notification.permission === 'granted') bgSync(); }, 1500);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { driveAuto(); checkReminders(); if (route().parts[0] === 'today') render(); } });
+setInterval(() => { checkReminders(); driveAuto(); }, 15 * 60 * 1000);
