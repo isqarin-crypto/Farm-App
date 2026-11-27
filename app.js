@@ -1,7 +1,7 @@
 'use strict';
 /* Farm Manager — offline single-phone farm records. Data lives in this browser's localStorage. */
 
-const APP_VERSION = '18';
+const APP_VERSION = '19';
 const KEY = 'farmapp.v1';
 const app = document.getElementById('app');
 
@@ -217,6 +217,7 @@ function recSub(r, showBlock = true) {
   if (r.issueId && issueById(r.issueId)) p.push('Problem: ' + issueName(issueById(r.issueId)));
   if (r.type === 'irrigation') { if (num(r.minutes)) p.push(fmt(num(r.minutes)) + ' min'); if (num(r.m3)) p.push(fmt(num(r.m3)) + ' m³'); }
   if (r.type === 'scouting' && r.severity) p.push('Pressure: ' + r.severity);
+  if ((r.photos || []).length) p.push(`📷 ${r.photos.length}`);
   if (r.type === 'fertigation' && (r.ec || r.ph)) p.push([r.ec ? 'EC ' + r.ec : '', r.ph ? 'pH ' + r.ph : ''].filter(Boolean).join(' '));
   if (r.type === 'spray' && r.status === 'done' && num(r.phiDays) > 0) p.push('PHI to ' + fd(addDays(recEnd(r), num(r.phiDays))));
   if (r.notes) p.push(r.notes.length > 60 ? r.notes.slice(0, 60) + '…' : r.notes);
@@ -560,8 +561,8 @@ function vRecord() {
       <div id="calc">${calcHtml()}</div><div id="checks">${checksHtml()}</div>`;
   } else if (d.type === 'scouting') {
     specific = `${fld('target', 'Pest / disease found')}
-      ${d.blockId || d.target ? `<a class="btn sm" href="#ai?block=${d.blockId}&note=${encodeURIComponent(encodeURIComponent(d.target || ''))}" style="align-self:flex-start">${ic('search', 16, 2)}Ask AI about this</a>` : ''}
       <div class="g2"><div class="f"><label for="r_severity">Pressure</label><select id="r_severity" data-f="severity">${['', 'none', 'low', 'moderate', 'high'].map(v => `<option value="${v}" ${d.severity === v ? 'selected' : ''}>${v ? v[0].toUpperCase() + v.slice(1) : 'Choose…'}</option>`).join('')}</select></div>${fld('count', 'Count / threshold note')}</div>`;
+    specific += scoutAIBox(d);
   } else if (d.type === 'irrigation') {
     specific = `<div class="g2">${fld('minutes', 'Run time (min)', 'inputmode="decimal"')}${fld('m3', 'Volume (m³)', 'inputmode="decimal"')}</div>`;
   } else if (d.type === 'activity') {
@@ -1835,7 +1836,7 @@ function aiSettingsCard() {
     <span class="hint">Questions about your own records (last spray, crop age, stock, money) are always answered on the phone with no AI: ${A.localCount || 0} so far.</span></div>`;
 }
 const refSelect = (tier, cur) => `<div class="f"><label for="rt_${tier}">${TIERS[tier]}</label><select id="rt_${tier}" data-ar="${tier}"><option value="">${tier === 'routine' ? 'Choose a model…' : 'Same as everyday'}</option>${allModels().map(x => `<option value="${esc(x.ref)}" ${cur === x.ref ? 'selected' : ''}>${esc(x.m.id)} — ${esc(x.p.name)}${keyOf(x.p.id) ? '' : ' (no key)'}${x.m.vision ? ' · photos' : ''}</option>`).join('')}</select></div>`;
-const backToLabel = () => sdraft && sdraft.keep && sdraft.back ? `<a class="btn pri block" href="${esc(sdraft.back)}">${ic('back', 18, 2)}Back to the stock item${usableModels().some(x => x.m.vision) ? ' — ready to read the label' : ''}</a>` : '';
+const backToLabel = () => ui.backTo ? `<a class="btn pri block" href="${esc(ui.backTo)}">${ic('back', 18, 2)}${esc(ui.backLabel || 'Back')}${usableModels().length ? ' — ready to ask AI' : ''}</a>` : sdraft && sdraft.keep && sdraft.back ? `<a class="btn pri block" href="${esc(sdraft.back)}">${ic('back', 18, 2)}Back to the stock item${usableModels().some(x => x.m.vision) ? ' — ready to read the label' : ''}</a>` : '';
 function vAISet() {
   const A = AIS();
   const ck = (k, label, def) => `<label class="row" style="gap:10px;min-height:44px;font-size:14px"><input type="checkbox" class="check" data-as="${k}" ${(A[k] === undefined ? def : A[k]) ? 'checked' : ''}>${label}</label>`;
@@ -2010,6 +2011,8 @@ async function sweepPhotos() {
     if (db.settings.sample || !storageOK) return;
     const keep = new Set();
     db.stock.forEach(s => (s.labelPhotos || []).forEach(p => keep.add(p)));
+    db.records.forEach(r => (r.photos || []).forEach(p => keep.add(p)));
+    if (draft) (draft.photos || []).forEach(p => keep.add(p));
     if (sdraft) sdraft.photos.forEach(p => keep.add(p));
     (db.issues || []).forEach(i => { (i.photos || []).forEach(p => keep.add(p)); (i.updates || []).forEach(u => (u.photos || []).forEach(p => keep.add(p))); });
     const all = await PH.all();
@@ -2338,6 +2341,7 @@ function render(resetScroll) {
   const { parts, q } = route();
   const v = parts[0];
   if (v !== 'ai' && v !== 'settings') aiKey = null;
+  if (ui.backTo && !['aiset', 'aiprov', 'aiusage', 'settings'].includes(v)) ui.backTo = null;
   if (v !== 'stockedit' && !(sdraft && sdraft.keep && ['aiset', 'aiprov', 'aiusage', 'settings'].includes(v))) { if (sdraft) sdraft.keep = false; sdraftKey = null; }
   let html, tab = v;
   switch (v) {
@@ -2554,6 +2558,8 @@ const ACTS = {
     if (!(d.type === 'task' || d.type === 'other' || d.type === 'activity') && !d.blockId) return toast('Choose a block.');
     if ((d.type === 'task' || d.type === 'other') && !d.title.trim()) return toast('Describe the task.');
     const rec = JSON.parse(JSON.stringify(d));
+    if (rec.id) { const old = db.records.find(r => r.id === rec.id); ((old && old.photos) || []).filter(x => !(rec.photos || []).includes(x)).forEach(x => PH.del(x)); }
+    if (!(rec.photos || []).length) delete rec.photos;
     rec.lines = (rec.lines || []).filter(l => l.stockId);
     if (rec.type === 'spray' || rec.type === 'fertigation') {
       const missing = rec.lines.filter(l => !num(l.amount)).length;
@@ -2579,7 +2585,7 @@ const ACTS = {
   delrec: async () => {
     if (!await ask('Delete this record? Any stock it used will be added back.')) return;
     const i = db.records.findIndex(r => r.id === draft.id);
-    if (i >= 0) { restore(db.records[i]); db.records.splice(i, 1); save(); }
+    if (i >= 0) { (db.records[i].photos || []).forEach(x => PH.del(x)); restore(db.records[i]); db.records.splice(i, 1); save(); }
     draftKey = null; toast('Record deleted'); history.back();
   },
   tpl: async el => {
@@ -2914,6 +2920,109 @@ Object.assign(ACTS, {
 document.addEventListener('change', e => {
   const el = e.target;
   if ((el.id === 'sl_cam' || el.id === 'sl_gal') && sdraft && el.files && el.files.length) addLabelPhotos([...el.files]);
+});
+
+/* ---------- scouting record: ask AI with text and photos, inside the form ---------- */
+let sai = null; /* {key, q, long, a, busy, error} — conversation state for the open scouting form */
+function scoutAI() { if (!sai || sai.key !== draftKey) sai = { key: draftKey, q: '', long: false, a: null, busy: false, error: '', fresh: [] }; return sai; }
+function scoutPhotoStrip(d) {
+  const x14 = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  const ph = d.photos || [];
+  const tiles = ph.map((id, k) => `<div style="position:relative;width:88px;height:88px;flex:none"><button type="button" class="ph" data-act="photo" data-pid="${esc(id)}" data-cap="Scouting photo" aria-label="Open photo ${k + 1}" style="width:88px;height:88px">${phImg(id, 'thumb', 'Scouting photo ' + (k + 1))}</button><button type="button" class="ib" data-act="scphdel" data-pid="${esc(id)}" aria-label="Remove photo ${k + 1}" style="position:absolute;top:-8px;right:-8px;width:32px;height:32px;border-radius:50%;background:#fff">${x14}</button></div>`).join('');
+  const add = ph.length < 4 ? `<label for="sc_cam" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0;flex:none">${ic('plus', 20, 2)}Camera</label><label for="sc_gal" class="btn" style="width:88px;height:88px;flex-direction:column;gap:4px;font-size:12px;padding:0;flex:none">${ic('plus', 20, 2)}Gallery</label>` : '';
+  return `<div class="row" style="gap:12px">${tiles}${add}</div><input id="sc_cam" type="file" accept="image/*" capture="environment" class="sr"><input id="sc_gal" type="file" accept="image/*" multiple class="sr">`;
+}
+function scoutAIBox(d) {
+  const S = scoutAI(), a = S.a, answers = a ? a.msgs.filter(m => m.role === 'assistant') : [];
+  const convo = a ? a.msgs.filter(m => m.role === 'assistant' || m.display).map(m => m.role === 'assistant'
+    ? `<div class="card" style="gap:4px;font-size:14px;line-height:1.5;background:#fff">${mdLite(m.text)}</div>`
+    : `<div style="align-self:flex-end;max-width:85%;background:var(--accbg);color:var(--acc2);border-radius:12px;padding:8px 12px;font-size:14px;white-space:pre-wrap">${esc(m.display)}</div>`).join('') : '';
+  return `<div class="card" style="gap:12px;border-color:var(--accline,var(--line))" id="scoutai">
+    <span class="t">${ic('search', 18, 2)} Ask AI about what you found</span>
+    <div class="f"><span class="lbl">Photos (up to 4, kept with this record)</span>${scoutPhotoStrip(d)}<span class="hint">Close-up of the affected leaf, top and underside, and one of the whole plant.</span></div>
+    ${convo ? `<div class="col" style="gap:10px">${convo}</div>` : ''}
+    ${S.error ? alertH('bad', 'warn', S.error, '') : ''}
+    ${S.busy ? `<div class="empty">Waiting for the answer…</div>` : ''}
+    <div class="f"><label for="sc_q">${answers.length ? 'Follow-up question' : 'What do you see? What do you want to know?'}</label><textarea id="sc_q" data-sq="q" placeholder="${answers.length ? 'e.g. Which of my products can I use 5 days before harvest?' : 'e.g. Yellow leaves with brown spots on the lower canopy, spreading for 4 days. What is it and what should I do?'}">${esc(S.q)}</textarea>
+      <span class="hint">The block, crop, recent sprays and your stock are attached automatically, together with the pest, pressure and notes on this form.</span></div>
+    <label class="row" style="gap:10px;min-height:40px;font-size:14px"><input type="checkbox" class="check" data-sq="long" ${S.long ? 'checked' : ''}>Detailed answer</label>
+    <button type="button" class="btn pri" data-act="scask" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Asking…' : answers.length ? 'Send follow-up' : 'Analyse with AI'}</button>
+    <div id="sc_setup"></div>
+    ${answers.length && !S.busy ? `<span class="hint">${esc(a.via)}${a.usage ? ` · ${a.usage.in.toLocaleString('en-US')} in / ${a.usage.out.toLocaleString('en-US')} out tokens · ${a.unpriced ? 'cost unknown' : 'about ' + usd(a.cost)}` : ''}</span>
+      <div class="g2"><button type="button" class="btn" data-act="scnotes">Add answer to notes</button><button type="button" class="btn" data-act="scnew">New question</button></div>
+      <p class="hint" style="margin:0">AI advice can be wrong and is not a record of work done. Confirm in the field and follow the product label.</p>` : ''}
+  </div>`;
+}
+async function scoutImages(d) {
+  const out = [];
+  for (const id of d.photos || []) { const r = await PH.get(id); if (r) { const b64 = r.full.split(',')[1]; out.push({ b64, dataUrl: r.full, file: toFile(b64, 'scouting.jpg') }); } }
+  return out;
+}
+function scoutSymptoms(d, q) {
+  return [d.target ? 'Found: ' + d.target : '', d.severity ? 'Pressure: ' + d.severity : '', d.count ? 'Count / incidence: ' + d.count : '', d.notes && d.notes.trim() ? 'Scouting notes: ' + d.notes.trim().slice(0, 600) : '', q].filter(Boolean).join('\n');
+}
+Object.assign(ACTS, {
+  scphdel: async el => {
+    const S = scoutAI(), id = el.dataset.pid;
+    draft.photos = (draft.photos || []).filter(x => x !== id);
+    if (S.fresh.includes(id)) { S.fresh = S.fresh.filter(x => x !== id); await PH.del(id); }
+    if (S.a) S.a.photos = S.a.photos.filter((p, i) => i < draft.photos.length);
+    render();
+  },
+  scnew: () => { const S = scoutAI(); S.a = null; S.q = ''; S.error = ''; render(); },
+  scnotes: () => {
+    const S = scoutAI(); if (!S.a) return;
+    const ans = S.a.msgs.filter(m => m.role === 'assistant').map(m => m.text).join('\n\n---\n\n').replace(/\*\*(.+?)\*\*/g, '$1').replace(/^#{1,4}\s+/gm, '');
+    draft.notes = (draft.notes && draft.notes.trim() ? draft.notes.trim() + '\n\n' : '') + `AI analysis (${fdy(today())}, ${S.a.via}) — advice, not work done:\n` + ans;
+    render(); toast('Answer added to the notes. Save the record to keep it.');
+    const n = document.getElementById('r_notes'); if (n) n.scrollIntoView({ block: 'center' });
+  },
+  scsetup: () => { ui.backTo = location.hash; ui.backLabel = 'Back to the scouting record'; go('#aiset'); },
+  scask: async () => {
+    const S = scoutAI(), d = draft; if (S.busy) return;
+    const q = S.q.trim(), first = !S.a;
+    if (first && !q && !(d.photos || []).length && !d.target) return toast('Add a photo or describe what you see.');
+    if (!first && !q) return toast('Type your follow-up question.');
+    if (!usableModels().length) {
+      const box = document.getElementById('sc_setup');
+      if (box) box.innerHTML = `<div class="card" style="gap:8px"><span class="t">Set up AI once</span><span class="s">Analysis inside the app needs an API key from an AI provider with a model that reads photos. It is paid per use, usually around one US cent or less per question.</span><button type="button" class="btn pri" data-act="scsetup">Set up an AI key</button><span class="hint">This record, its photos and your question are kept: you come straight back here.</span></div>`;
+      return;
+    }
+    let a = S.a;
+    if (first) {
+      a = freshAI(null); a.blockId = d.blockId; a.kind = 'diagnose'; a.symptoms = scoutSymptoms(d, q); a.photos = await scoutImages(d);
+      a.msgs = [{ role: 'user', text: firstPrompt(a), display: (q || 'Please analyse the photos.') + (a.photos.length ? `\n📷 ${a.photos.length} photo${a.photos.length > 1 ? 's' : ''}` : '') }];
+      a.resend = cacheFor(a, (pickRoute(a) || { p: {} }).p);
+    } else a.msgs.push({ role: 'user', text: q, display: q });
+    a.len = S.long ? 'long' : 'short';
+    if (!await preflight(a)) { if (!first) a.msgs.pop(); return; }
+    const rt = pickRoute(a); if (!rt) return;
+    S.a = a; S.q = ''; S.busy = true; S.error = ''; render();
+    const { p, m } = rt;
+    try {
+      const r = await callAI(p, m, sysPrompt(a), buildMsgs(a, cacheFor(a, p)), a.len === 'long' ? 2000 : 700);
+      const sp = splitMemo(r.text); a.msgs.push({ role: 'assistant', text: sp.text, memo: sp.memo });
+      const c = logUsage(p, m, r.usage, 'scouting');
+      a.usage = { in: (a.usage ? a.usage.in : 0) + r.usage.in, out: (a.usage ? a.usage.out : 0) + r.usage.out };
+      if (c == null) a.unpriced = true; else a.cost += c;
+      a.via = `${p.name} · ${m.id}`; a.stick = rt.ref; a.lastSig = a.sig || ''; a.lastAt = Date.now(); budgetNotice();
+    } catch (e) {
+      const u = a.msgs.pop(); S.q = u.role === 'user' ? (first ? q : u.text) : S.q; if (first) S.a = null;
+      S.error = e.message;
+    }
+    S.busy = false; if (route().parts[0] === 'record') render();
+  }
+});
+document.addEventListener('input', e => {
+  const el = e.target; if (!el.dataset || el.dataset.sq === undefined) return;
+  scoutAI()[el.dataset.sq] = el.type === 'checkbox' ? el.checked : el.value;
+});
+document.addEventListener('change', e => {
+  const el = e.target;
+  if ((el.id === 'sc_cam' || el.id === 'sc_gal') && draft && el.files && el.files.length) {
+    draft.photos = draft.photos || [];
+    addPhotos([...el.files], draft.photos, scoutAI().fresh, 4).then(() => { const S = scoutAI(); if (S.a) S.a = null, toast('Photos changed: the next question starts a new analysis.'); render(); });
+  }
 });
 
 /* ---------- AI actions ---------- */
